@@ -69,10 +69,73 @@ func WriteOPFSidecarFile(dir string, book *models.Book, author *models.Author, e
 		return fmt.Errorf("opfsidecar: create dir %q: %w", dir, err)
 	}
 	dest := filepath.Join(dir, opfSidecarFileName)
-	if err := os.WriteFile(dest, xmlBytes, 0o644); err != nil {
-		return fmt.Errorf("opfsidecar: write %q: %w", dest, err)
+	// Staged write, not os.WriteFile: WriteFile truncates first, so a crash
+	// (or an unlucky reader) mid-write leaves a zero-length or half-written
+	// metadata.opf, which is strictly worse than no sidecar — a library app
+	// parses it as a corrupt book instead of falling back to the filename.
+	// This is also the overwrite path (Reorganize rewrites an existing
+	// sidecar), so the truncate window is not a one-off. Same temp+rename
+	// shape as calibre.MaterializeCover; the rename is atomic because the temp
+	// file is created in the destination directory.
+	tmp, err := os.CreateTemp(dir, ".metadata.opf-*")
+	if err != nil {
+		return fmt.Errorf("opfsidecar: create temp in %q: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(xmlBytes); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("opfsidecar: write %q: %w", tmpName, err)
+	}
+	// CreateTemp makes the file 0600; the sidecar wants the same 0644 the
+	// library files it sits beside get, so it is readable by whatever reads
+	// the book itself.
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("opfsidecar: chmod %q: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("opfsidecar: close %q: %w", tmpName, err)
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("opfsidecar: rename into %q: %w", dest, err)
 	}
 	return nil
+}
+
+// removeOrphanedSidecar deletes a metadata.opf left alone in oldDir after the
+// book file it described moved out (Reorganize). Without it a reorganize that
+// renames a book's folder strands the old folder permanently: the sidecar
+// keeps the folder non-empty, so pruneEmptyParents' os.Remove fails with
+// ENOTEMPTY, and the library accumulates one orphan folder per rename, each
+// holding an out-of-date copy of a book's metadata that a sidecar-reading
+// library app will happily index as a real book.
+//
+// Deliberately NOT gated on import.write_opf_sidecar: turning the setting off
+// does not retract the sidecars already on disk, and those strand folders just
+// the same. The guard is instead that the sidecar must be the SOLE remaining
+// entry. A folder still holding another format of the book — or anything else
+// at all — is left completely alone, sidecar included; a folder holding
+// nothing but a metadata.opf is one pruneEmptyParents was going to reclaim
+// anyway. Best-effort: a failure only leaves the folder behind, which is
+// exactly the prior behaviour.
+func removeOrphanedSidecar(oldDir, newDir string) {
+	if oldDir == "" || filepath.Clean(oldDir) == filepath.Clean(newDir) {
+		return
+	}
+	entries, err := os.ReadDir(oldDir)
+	if err != nil || len(entries) != 1 {
+		return
+	}
+	if entries[0].IsDir() || entries[0].Name() != opfSidecarFileName {
+		return
+	}
+	if err := os.Remove(filepath.Join(oldDir, opfSidecarFileName)); err != nil {
+		slog.Warn("opf sidecar: failed to remove the orphaned sidecar left by a move", "dir", oldDir, "error", err)
+	}
 }
 
 // BuildOPFXML renders book/author/edition metadata as a Calibre-style OPF

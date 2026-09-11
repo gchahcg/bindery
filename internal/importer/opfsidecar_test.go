@@ -262,4 +262,176 @@ func TestWriteOPFSidecarFile(t *testing.T) {
 	if p.Metadata.Title != book.Title {
 		t.Errorf("after overwrite, title = %q, want %q", p.Metadata.Title, book.Title)
 	}
+
+	// The write stages through a temp file and renames; neither the first
+	// write nor the overwrite may leave that temp file behind. A stray one
+	// would sit in the library folder forever and, worse, keep the folder
+	// non-empty so Reorganize's pruneEmptyParents could never reclaim it.
+	entries, err := os.ReadDir(bookDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "metadata.opf" {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("book folder holds %v, want just [metadata.opf]", names)
+	}
+}
+
+// TestBuildOPFXML_EscapesEveryInterpolatedField widens the escaping guard past
+// title and author. Every value below arrives from provider metadata or a user
+// edit and can carry XML metacharacters, so each interpolation site is checked
+// on its own rather than trusting that one escaped field means the rest are —
+// a single unescaped "&" anywhere makes the whole document unparseable, taking
+// the correctly-escaped fields down with it.
+func TestBuildOPFXML_EscapesEveryInterpolatedField(t *testing.T) {
+	isbn13 := "9780345472199"
+	book := &models.Book{
+		ID:          5,
+		Title:       `Cats & Dogs <vol 1> "revised" 'ed'`,
+		SortTitle:   `Cats & Dogs, "revised"`,
+		Description: "Chapter 1 & <b>2</b>\nA \"quoted\" line — with ünïcode 😀 and an apostrophe's worth of trouble",
+		Genres:      []string{`Sci-Fi & Fantasy`, `<Horror>`, `"Literary"`},
+		Narrator:    `Reader & "Co"`,
+		Language:    "eng",
+	}
+	author := &models.Author{Name: `Ann & <Bob>`, SortName: `Bob, "Ann" & Co`}
+	edition := &models.Edition{Publisher: `Smith & <Sons> "Ltd"`, ISBN13: &isbn13}
+
+	xmlBytes, err := BuildOPFXML(book, author, edition, `Saga & <One> "Two"`, `1 & 2`)
+	if err != nil {
+		t.Fatalf("BuildOPFXML: %v", err)
+	}
+	p := parseOPFProbe(t, xmlBytes)
+
+	for _, tc := range []struct{ field, got, want string }{
+		{"title", p.Metadata.Title, book.Title},
+		{"creator", p.Metadata.Creator, author.Name},
+		{"contributor", p.Metadata.Contributor, book.Narrator},
+		{"publisher", p.Metadata.Publisher, edition.Publisher},
+		{"description", p.Metadata.Description, book.Description},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s round-tripped as %q, want %q", tc.field, tc.got, tc.want)
+		}
+	}
+	if len(p.Metadata.Subjects) != len(book.Genres) {
+		t.Fatalf("subjects = %v, want %d entries", p.Metadata.Subjects, len(book.Genres))
+	}
+	for i, want := range book.Genres {
+		if p.Metadata.Subjects[i] != want {
+			t.Errorf("subject[%d] = %q, want %q", i, p.Metadata.Subjects[i], want)
+		}
+	}
+	// Attribute sites (opf:file-as, calibre:*) escape separately from element
+	// text, so they get their own assertions.
+	for _, tc := range []struct{ name, want string }{
+		{"calibre:title_sort", book.SortTitle},
+		{"calibre:series", `Saga & <One> "Two"`},
+		{"calibre:series_index", `1 & 2`},
+	} {
+		got, ok := metaContent(p, tc.name)
+		if !ok || got != tc.want {
+			t.Errorf("%s = %q (found=%v), want %q", tc.name, got, ok, tc.want)
+		}
+	}
+	if len(p.Metadata.Identifiers) == 0 {
+		t.Error("expected at least the bindery identifier")
+	}
+}
+
+// Provider metadata occasionally carries raw control bytes or invalid UTF-8,
+// which are not representable in XML at all. They must be sanitised into a
+// still-parseable document rather than producing a file no reader can open.
+func TestBuildOPFXML_SanitisesUnrepresentableCharacters(t *testing.T) {
+	book := &models.Book{
+		ID:          9,
+		Title:       "Bad\x00Title\x08Here",
+		Description: "invalid utf-8: \xff\xfe tail",
+	}
+	xmlBytes, err := BuildOPFXML(book, nil, nil, "", "")
+	if err != nil {
+		t.Fatalf("BuildOPFXML: %v", err)
+	}
+	p := parseOPFProbe(t, xmlBytes)
+	if !strings.Contains(p.Metadata.Title, "Title") || !strings.Contains(p.Metadata.Title, "Here") {
+		t.Errorf("title lost its printable content: %q", p.Metadata.Title)
+	}
+	if strings.ContainsAny(string(xmlBytes), "\x00\x08") {
+		t.Error("raw control characters must not reach the file")
+	}
+}
+
+// A nil author, nil edition, nil dates, an empty description and an empty
+// genre must all be skipped rather than emitting an empty element a reader
+// would take as "this book has no title/publisher/date" data.
+func TestBuildOPFXML_SkipsEmptyFieldsEntirely(t *testing.T) {
+	book := &models.Book{
+		ID:          11,
+		Title:       "Only A Title",
+		SortTitle:   "   ",
+		Description: "  \n ",
+		Genres:      []string{"", "   ", "Fantasy"},
+		Narrator:    " ",
+		Language:    "",
+	}
+	author := &models.Author{Name: "   "}
+	edition := &models.Edition{Publisher: " ", Language: "  "}
+
+	xmlBytes, err := BuildOPFXML(book, author, edition, "  ", "3")
+	if err != nil {
+		t.Fatalf("BuildOPFXML: %v", err)
+	}
+	out := string(xmlBytes)
+	for _, tag := range []string{"dc:creator", "dc:contributor", "dc:publisher", "dc:date", "dc:description", "dc:language", "calibre:title_sort", "calibre:series", "calibre:series_index"} {
+		if strings.Contains(out, tag) {
+			t.Errorf("blank field still emitted %s:\n%s", tag, out)
+		}
+	}
+	p := parseOPFProbe(t, xmlBytes)
+	if len(p.Metadata.Subjects) != 1 || p.Metadata.Subjects[0] != "Fantasy" {
+		t.Errorf("subjects = %v, want only the non-blank genre", p.Metadata.Subjects)
+	}
+}
+
+// The edition wins over the book for language, publisher and date — the same
+// precedence calibreMetadata applies, which is the whole point of sharing the
+// calibre.* helpers. A divergence here means a book's sidecar and its
+// calibredb-pushed metadata disagree.
+func TestBuildOPFXML_EditionOverridesBookFields(t *testing.T) {
+	book, author, edition := fullBookFixture()
+	book.Language = "spa"
+	edition.Language = "fre"
+
+	p := parseOPFProbe(t, mustBuildOPF(t, book, author, edition))
+	if p.Metadata.Language != "fr" {
+		t.Errorf("language = %q, want the edition's normalized %q", p.Metadata.Language, "fr")
+	}
+	if p.Metadata.Date != "2021-06-01" {
+		t.Errorf("date = %q, want the edition's publish date", p.Metadata.Date)
+	}
+
+	// With no edition date, the book's release date is the fallback.
+	edition.PublishDate = nil
+	p = parseOPFProbe(t, mustBuildOPF(t, book, author, edition))
+	if p.Metadata.Date != "2020-03-15" {
+		t.Errorf("date = %q, want the book's release date fallback", p.Metadata.Date)
+	}
+
+	// With neither, no dc:date at all rather than an empty one.
+	book.ReleaseDate = nil
+	if out := string(mustBuildOPF(t, book, author, edition)); strings.Contains(out, "dc:date") {
+		t.Errorf("no date anywhere must emit no dc:date:\n%s", out)
+	}
+}
+
+func mustBuildOPF(t *testing.T, book *models.Book, author *models.Author, edition *models.Edition) []byte {
+	t.Helper()
+	out, err := BuildOPFXML(book, author, edition, "", "")
+	if err != nil {
+		t.Fatalf("BuildOPFXML: %v", err)
+	}
+	return out
 }
