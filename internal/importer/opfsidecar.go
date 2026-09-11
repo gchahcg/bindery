@@ -45,22 +45,53 @@ func (s *Scanner) opfSidecarEnabled(ctx context.Context) bool {
 // failure is logged and swallowed rather than failing an otherwise-good
 // import or reorganize move. dir is the book's folder — the caller passes
 // filepath.Dir(destPath) for a single ebook file or the audiobook
-// destination directory directly.
-func (s *Scanner) writeOPFSidecar(ctx context.Context, dir string, book *models.Book, author *models.Author, edition *models.Edition, seriesTitle, seriesNum string) {
+// destination directory directly. roots is the set of configured library
+// roots dir must resolve inside (see dirWithinRoots) — every caller already
+// derives dir from Renamer.DestPath/AudiobookDestDir, which sanitize and
+// contain it before this is ever reached, but this function does not trust
+// that: it re-verifies independently rather than assuming every future
+// caller gets that right.
+func (s *Scanner) writeOPFSidecar(ctx context.Context, dir string, roots []string, book *models.Book, author *models.Author, edition *models.Edition, seriesTitle, seriesNum string) {
 	if !s.opfSidecarEnabled(ctx) || book == nil || dir == "" {
 		return
 	}
-	if err := WriteOPFSidecarFile(dir, book, author, edition, seriesTitle, seriesNum); err != nil {
+	if err := WriteOPFSidecarFile(dir, roots, book, author, edition, seriesTitle, seriesNum); err != nil {
 		slog.Warn("opf sidecar: write failed, continuing", "bookID", book.ID, "dir", dir, "error", err)
 		return
 	}
 	slog.Info("opf sidecar: metadata.opf written", "bookID", book.ID, "dir", dir)
 }
 
+// dirWithinRoots reports whether dir resolves inside at least one of roots,
+// reusing ensureContained's same prefix-after-Clean check that
+// Renamer.DestPath/AudiobookDestDir already apply. WriteOPFSidecarFile calls
+// this itself, independent of any sanitization its caller already did, so a
+// book/author string sourced from remote provider metadata can never steer
+// a library-folder-derived path outside the configured roots — this is the
+// direct guard for what a path-injection static analysis (rightly) cannot
+// verify by tracing through the renamer's own containment check several
+// calls upstream.
+func dirWithinRoots(dir string, roots []string) bool {
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		if _, err := ensureContained(dir, root); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // WriteOPFSidecarFile renders book/author/edition metadata as a
 // Calibre-style OPF package document and writes it to
-// filepath.Join(dir, "metadata.opf"), creating dir if needed.
-func WriteOPFSidecarFile(dir string, book *models.Book, author *models.Author, edition *models.Edition, seriesTitle, seriesNum string) error {
+// filepath.Join(dir, "metadata.opf"), creating dir if needed. roots is the
+// set of acceptable library roots dir must resolve inside (see
+// dirWithinRoots); a dir outside every root is refused rather than written.
+func WriteOPFSidecarFile(dir string, roots []string, book *models.Book, author *models.Author, edition *models.Edition, seriesTitle, seriesNum string) error {
+	if !dirWithinRoots(dir, roots) {
+		return fmt.Errorf("opfsidecar: refusing to write outside configured library roots: %q", dir)
+	}
 	xmlBytes, err := BuildOPFXML(book, author, edition, seriesTitle, seriesNum)
 	if err != nil {
 		return fmt.Errorf("opfsidecar: build xml: %w", err)

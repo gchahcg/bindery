@@ -1912,7 +1912,7 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 
 		s.pushToCalibre(ctx, book, author, edition, seriesTitle, seriesNum, destDir)
 		s.pushToABS(ctx)
-		s.writeOPFSidecar(ctx, destDir, book, author, edition, seriesTitle, seriesNum)
+		s.writeOPFSidecar(ctx, destDir, []string{audiobookRoot}, book, author, edition, seriesTitle, seriesNum)
 
 		historyMeta := map[string]string{"path": destDir, "format": models.MediaTypeAudiobook}
 		if len(mergeSkippedFiles) > 0 {
@@ -2094,7 +2094,7 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 	// otherwise regenerate the identical sidecar once per format.
 	if imported > 0 && sidecarDir != "" {
 		seriesTitle, seriesNum := s.primarySeriesFor(ctx, book)
-		s.writeOPFSidecar(ctx, sidecarDir, book, author, edition, seriesTitle, seriesNum)
+		s.writeOPFSidecar(ctx, sidecarDir, []string{ebookRoot}, book, author, edition, seriesTitle, seriesNum)
 	}
 
 	// If every file failed to copy/move, the destination is likely not writable —

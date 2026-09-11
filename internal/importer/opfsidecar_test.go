@@ -232,10 +232,11 @@ func TestBuildOPFXML_EscapesSpecialCharacters(t *testing.T) {
 
 func TestWriteOPFSidecarFile(t *testing.T) {
 	dir := t.TempDir()
+	roots := []string{dir}
 	bookDir := filepath.Join(dir, "Brandon Sanderson", "The Way of Kings (2020)")
 	book, author, edition := fullBookFixture()
 
-	if err := WriteOPFSidecarFile(bookDir, book, author, edition, "", ""); err != nil {
+	if err := WriteOPFSidecarFile(bookDir, roots, book, author, edition, "", ""); err != nil {
 		t.Fatalf("WriteOPFSidecarFile: %v", err)
 	}
 	dest := filepath.Join(bookDir, "metadata.opf")
@@ -251,7 +252,7 @@ func TestWriteOPFSidecarFile(t *testing.T) {
 	// Re-writing (e.g. via Reorganize) must overwrite cleanly, not append or
 	// fail because the file and directory already exist.
 	book.Title = "The Way of Kings: Author's Definitive Edition"
-	if err := WriteOPFSidecarFile(bookDir, book, author, edition, "", ""); err != nil {
+	if err := WriteOPFSidecarFile(bookDir, roots, book, author, edition, "", ""); err != nil {
 		t.Fatalf("WriteOPFSidecarFile (overwrite): %v", err)
 	}
 	data, err = os.ReadFile(dest)
@@ -277,6 +278,42 @@ func TestWriteOPFSidecarFile(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Errorf("book folder holds %v, want just [metadata.opf]", names)
+	}
+}
+
+// TestWriteOPFSidecarFile_RefusesOutsideRoots is the direct regression test
+// for dirWithinRoots: WriteOPFSidecarFile must refuse to write when dir does
+// not resolve inside any given root, rather than trusting that a caller
+// already sanitized it. Every real caller derives dir from
+// Renamer.DestPath/AudiobookDestDir, which already apply this exact
+// containment check — this test exercises the independent guard
+// WriteOPFSidecarFile itself applies regardless of what the caller did.
+func TestWriteOPFSidecarFile_RefusesOutsideRoots(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir() // a sibling temp dir, not under root
+	book, author, edition := fullBookFixture()
+
+	err := WriteOPFSidecarFile(outside, []string{root}, book, author, edition, "", "")
+	if err == nil {
+		t.Fatal("want an error writing outside the given roots, got nil")
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "metadata.opf")); !os.IsNotExist(statErr) {
+		t.Errorf("metadata.opf should not have been written to %s", outside)
+	}
+
+	// A traversal attempt through a root-relative-looking path must not
+	// escape either: filepath.Join(root, "..", "escaped") resolves outside
+	// root once Cleaned, same as ensureContained already checks for
+	// Renamer.DestPath.
+	traversal := filepath.Join(root, "..", "escaped")
+	if err := WriteOPFSidecarFile(traversal, []string{root}, book, author, edition, "", ""); err == nil {
+		t.Fatal("want an error for a path that traverses outside root, got nil")
+	}
+
+	// Sanity: the same call with the correct root still succeeds.
+	inside := filepath.Join(root, "Some Author", "Some Book (2020)")
+	if err := WriteOPFSidecarFile(inside, []string{root}, book, author, edition, "", ""); err != nil {
+		t.Fatalf("WriteOPFSidecarFile inside root: %v", err)
 	}
 }
 

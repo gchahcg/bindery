@@ -319,7 +319,7 @@ func (s *Scanner) applyOne(ctx context.Context, fileID int64) ReorganizeMove {
 			sidecarDir = filepath.Dir(proposed)
 		}
 		edition := s.resolveCalibreEdition(ctx, nil, book)
-		s.writeOPFSidecar(ctx, sidecarDir, book, author, edition, seriesTitle, seriesNum)
+		s.writeOPFSidecar(ctx, sidecarDir, s.rootsForFormat(ctx, author, file.Format), book, author, edition, seriesTitle, seriesNum)
 	}
 
 	m.Status = ReorgStatusMoved
