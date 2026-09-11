@@ -1,0 +1,229 @@
+package importer
+
+import (
+	"bytes"
+	"context"
+	"encoding/xml"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/vavallee/bindery/internal/calibre"
+	"github.com/vavallee/bindery/internal/models"
+)
+
+// opfSidecarFileName is the Calibre convention this mirrors: one
+// metadata.opf per book folder. Unambiguous because Bindery gives every
+// book its own folder — multiple files of the SAME book (formats of one
+// edition, or a merged ebook+audiobook pair) can share a folder, but two
+// different books never do (see DestPath/AudiobookDestDir).
+const opfSidecarFileName = "metadata.opf"
+
+// opfSidecarEnabled reports whether the opt-in "write a metadata.opf
+// sidecar" feature is on (import.write_opf_sidecar). Off by default: unlike
+// renaming, this is the first time Bindery writes a *new* file into a
+// library folder rather than just moving/renaming the download, so it opts
+// in rather than opting out. Read as a string literal to avoid an import
+// cycle with the api package; keep in sync with
+// api.SettingImportWriteOPFSidecar.
+func (s *Scanner) opfSidecarEnabled(ctx context.Context) bool {
+	if s.settings == nil {
+		return false
+	}
+	setting, err := s.settings.Get(ctx, "import.write_opf_sidecar")
+	if err != nil || setting == nil {
+		return false
+	}
+	return setting.Value == "true"
+}
+
+// writeOPFSidecar writes (or overwrites) metadata.opf in dir when the
+// setting is on. Best-effort, mirroring pushToCWA/pushToCalibre: a sidecar
+// failure is logged and swallowed rather than failing an otherwise-good
+// import or reorganize move. dir is the book's folder — the caller passes
+// filepath.Dir(destPath) for a single ebook file or the audiobook
+// destination directory directly.
+func (s *Scanner) writeOPFSidecar(ctx context.Context, dir string, book *models.Book, author *models.Author, edition *models.Edition, seriesTitle, seriesNum string) {
+	if !s.opfSidecarEnabled(ctx) || book == nil || dir == "" {
+		return
+	}
+	if err := WriteOPFSidecarFile(dir, book, author, edition, seriesTitle, seriesNum); err != nil {
+		slog.Warn("opf sidecar: write failed, continuing", "bookID", book.ID, "dir", dir, "error", err)
+		return
+	}
+	slog.Info("opf sidecar: metadata.opf written", "bookID", book.ID, "dir", dir)
+}
+
+// WriteOPFSidecarFile renders book/author/edition metadata as a
+// Calibre-style OPF package document and writes it to
+// filepath.Join(dir, "metadata.opf"), creating dir if needed.
+func WriteOPFSidecarFile(dir string, book *models.Book, author *models.Author, edition *models.Edition, seriesTitle, seriesNum string) error {
+	xmlBytes, err := BuildOPFXML(book, author, edition, seriesTitle, seriesNum)
+	if err != nil {
+		return fmt.Errorf("opfsidecar: build xml: %w", err)
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("opfsidecar: create dir %q: %w", dir, err)
+	}
+	dest := filepath.Join(dir, opfSidecarFileName)
+	if err := os.WriteFile(dest, xmlBytes, 0o644); err != nil {
+		return fmt.Errorf("opfsidecar: write %q: %w", dest, err)
+	}
+	return nil
+}
+
+// BuildOPFXML renders book/author/edition metadata as a Calibre-style OPF
+// package document (the same "content.opf" schema an EPUB carries inside
+// its own zip, minus the file-manifest/spine sections that only make sense
+// for an actual archive — see ReadEpubMetadata's read-side counterpart).
+//
+// Deliberately built by hand rather than via encoding/xml struct tags:
+// namespaced attributes (opf:role, opf:file-as, opf:scheme) are awkward to
+// get byte-stable through Go's XML marshaller, and parseOPFMetadata already
+// established that this codebase treats OPF as "walk/write the tokens
+// directly" rather than "bind a fixed struct" for exactly that reason.
+//
+// Reuses the same field-resolution helpers as the Calibre push integration
+// (calibre.IdentifiersForBook, calibre.NormalizeLanguageForCalibre,
+// calibre.FormatPublishedDate) so a book's metadata.opf and its
+// calibredb-pushed metadata never disagree. One deliberate divergence:
+// Book.AverageRating is left out of calibre:rating here, unlike
+// calibreMetadata. Calibre's rating field is a personal 1-5 star rating;
+// AverageRating is a public/aggregate score pulled from a provider, and
+// writing it under a tag readers expect to mean "your rating" would be
+// misleading. The Calibre push integration made the opposite call for its
+// own (pre-existing, out of scope here) reasons — this does not change that.
+//
+// No cover reference is written: Bindery never places a cover image file in
+// the library folder (covers are proxied/cached separately), so there is
+// nothing on disk for a <meta name="cover"> to point at.
+func BuildOPFXML(book *models.Book, author *models.Author, edition *models.Edition, seriesTitle, seriesNum string) ([]byte, error) {
+	if book == nil {
+		return nil, fmt.Errorf("opfsidecar: nil book")
+	}
+
+	var uniqueID string
+	var meta bytes.Buffer
+
+	fmt.Fprintf(&meta, "    <dc:title>%s</dc:title>\n", opfEscape(book.Title))
+	if strings.TrimSpace(book.SortTitle) != "" {
+		fmt.Fprintf(&meta, "    <meta name=\"calibre:title_sort\" content=%s/>\n", opfAttr(book.SortTitle))
+	}
+
+	if author != nil && strings.TrimSpace(author.Name) != "" {
+		if fileAs := strings.TrimSpace(author.SortName); fileAs != "" {
+			fmt.Fprintf(&meta, "    <dc:creator opf:role=\"aut\" opf:file-as=%s>%s</dc:creator>\n", opfAttr(fileAs), opfEscape(author.Name))
+		} else {
+			fmt.Fprintf(&meta, "    <dc:creator opf:role=\"aut\">%s</dc:creator>\n", opfEscape(author.Name))
+		}
+	}
+
+	if narrator := strings.TrimSpace(book.Narrator); narrator != "" {
+		fmt.Fprintf(&meta, "    <dc:contributor opf:role=\"nrt\">%s</dc:contributor>\n", opfEscape(narrator))
+	}
+
+	identifiers := calibre.IdentifiersForBook(book, edition)
+	keys := make([]string, 0, len(identifiers))
+	for k := range identifiers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		scheme := opfIdentifierScheme(k)
+		if k == "bindery" {
+			uniqueID = "bindery-id"
+			fmt.Fprintf(&meta, "    <dc:identifier id=%s opf:scheme=%s>%s</dc:identifier>\n", opfAttr(uniqueID), opfAttr(scheme), opfEscape(identifiers[k]))
+			continue
+		}
+		fmt.Fprintf(&meta, "    <dc:identifier opf:scheme=%s>%s</dc:identifier>\n", opfAttr(scheme), opfEscape(identifiers[k]))
+	}
+
+	language := book.Language
+	if edition != nil && strings.TrimSpace(edition.Language) != "" {
+		language = edition.Language
+	}
+	if language = calibre.NormalizeLanguageForCalibre(language); language != "" {
+		fmt.Fprintf(&meta, "    <dc:language>%s</dc:language>\n", opfEscape(language))
+	}
+
+	if edition != nil && strings.TrimSpace(edition.Publisher) != "" {
+		fmt.Fprintf(&meta, "    <dc:publisher>%s</dc:publisher>\n", opfEscape(edition.Publisher))
+	}
+
+	date := ""
+	if edition != nil && edition.PublishDate != nil {
+		date = calibre.FormatPublishedDate(edition.PublishDate)
+	} else if book.ReleaseDate != nil {
+		date = calibre.FormatPublishedDate(book.ReleaseDate)
+	}
+	if date != "" {
+		fmt.Fprintf(&meta, "    <dc:date>%s</dc:date>\n", opfEscape(date))
+	}
+
+	if strings.TrimSpace(book.Description) != "" {
+		fmt.Fprintf(&meta, "    <dc:description>%s</dc:description>\n", opfEscape(book.Description))
+	}
+
+	for _, genre := range book.Genres {
+		if strings.TrimSpace(genre) == "" {
+			continue
+		}
+		fmt.Fprintf(&meta, "    <dc:subject>%s</dc:subject>\n", opfEscape(genre))
+	}
+
+	if strings.TrimSpace(seriesTitle) != "" {
+		fmt.Fprintf(&meta, "    <meta name=\"calibre:series\" content=%s/>\n", opfAttr(seriesTitle))
+		if strings.TrimSpace(seriesNum) != "" {
+			fmt.Fprintf(&meta, "    <meta name=\"calibre:series_index\" content=%s/>\n", opfAttr(seriesNum))
+		}
+	}
+
+	var doc bytes.Buffer
+	doc.WriteString(`<?xml version="1.0" encoding="utf-8"?>` + "\n")
+	if uniqueID != "" {
+		fmt.Fprintf(&doc, "<package xmlns=\"http://www.idpf.org/2007/opf\" unique-identifier=%s version=\"2.0\">\n", opfAttr(uniqueID))
+	} else {
+		doc.WriteString("<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\">\n")
+	}
+	doc.WriteString("  <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:opf=\"http://www.idpf.org/2007/opf\">\n")
+	doc.Write(meta.Bytes())
+	doc.WriteString("  </metadata>\n")
+	doc.WriteString("</package>\n")
+	return doc.Bytes(), nil
+}
+
+// opfIdentifierScheme maps a calibre.IdentifiersForBook key to the
+// opf:scheme value real Calibre metadata.opf files use for it, falling back
+// to an uppercased form of the key (underscores to hyphens, matching
+// Calibre's own multi-word scheme style like "MOBI-ASIN") for anything not
+// specifically known.
+func opfIdentifierScheme(key string) string {
+	switch key {
+	case "bindery":
+		return "BINDERY"
+	case "isbn":
+		return "ISBN"
+	case "asin":
+		return "MOBI-ASIN"
+	default:
+		return strings.ToUpper(strings.ReplaceAll(key, "_", "-"))
+	}
+}
+
+// opfEscape XML-escapes text content (dc:title, dc:description, …).
+func opfEscape(s string) string {
+	var buf bytes.Buffer
+	// xml.EscapeText cannot fail on a bytes.Buffer target.
+	_ = xml.EscapeText(&buf, []byte(s))
+	return buf.String()
+}
+
+// opfAttr renders s as a double-quoted, escaped XML attribute value
+// (including the quotes), so callers can drop it straight after "=" without
+// juggling quote characters themselves.
+func opfAttr(s string) string {
+	return "\"" + opfEscape(s) + "\""
+}

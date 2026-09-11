@@ -1912,6 +1912,7 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 
 		s.pushToCalibre(ctx, book, author, edition, seriesTitle, seriesNum, destDir)
 		s.pushToABS(ctx)
+		s.writeOPFSidecar(ctx, destDir, book, author, edition, seriesTitle, seriesNum)
 
 		historyMeta := map[string]string{"path": destDir, "format": models.MediaTypeAudiobook}
 		if len(mergeSkippedFiles) > 0 {
@@ -2065,6 +2066,7 @@ func (s *Scanner) tryImportInternal(ctx context.Context, dl *models.Download, do
 		s.pushToCalibre(ctx, book, author, edition, seriesTitle, seriesNum, destPath)
 		s.pushToCWA(ctx, destPath)
 		s.pushToGrimmory(ctx, book, destPath)
+		s.writeOPFSidecar(ctx, filepath.Dir(destPath), book, author, edition, seriesTitle, seriesNum)
 
 		s.createHistoryEvent(ctx, models.HistoryEventBookImported, dl.Title, dl.BookID, map[string]string{"path": destPath, "format": models.MediaTypeEbook})
 	}

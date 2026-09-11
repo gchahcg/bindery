@@ -431,6 +431,7 @@ var webSettingKeys = []string{
 	"import.drop_layout",
 	"import.drop_link_mode",
 	"import.mode",
+	"import.write_opf_sidecar",
 	"library.defaultRootFolderId",
 	"log.retention_days",
 	"metadata.primary_provider",

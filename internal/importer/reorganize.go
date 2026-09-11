@@ -296,6 +296,20 @@ func (s *Scanner) applyOne(ctx context.Context, fileID int64) ReorganizeMove {
 		"format": file.Format,
 	})
 
+	// Regenerate the metadata.opf sidecar (when the feature is on) so it
+	// reflects the current metadata — this is Reorganize's normal job for
+	// folder names, and the sidecar is exactly the same kind of "derived from
+	// the DB, stale until something re-derives it" artifact (#1970-adjacent
+	// design note: nothing else in the importer auto-refreshes on a plain
+	// metadata edit either; Reorganize is the one place that already
+	// re-touches disk with current metadata, so it's the natural hook).
+	sidecarDir := proposed
+	if file.Format != models.MediaTypeAudiobook {
+		sidecarDir = filepath.Dir(proposed)
+	}
+	edition := s.resolveCalibreEdition(ctx, nil, book)
+	s.writeOPFSidecar(ctx, sidecarDir, book, author, edition, seriesTitle, seriesNum)
+
 	m.Status = ReorgStatusMoved
 	return m
 }
