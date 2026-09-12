@@ -157,15 +157,28 @@ func removeOrphanedSidecar(oldDir, newDir string) {
 	if oldDir == "" || filepath.Clean(oldDir) == filepath.Clean(newDir) {
 		return
 	}
-	entries, err := os.ReadDir(oldDir)
+	RemoveOrphanedSidecar(oldDir)
+}
+
+// RemoveOrphanedSidecar deletes metadata.opf from dir when it is the SOLE
+// remaining entry there, so a caller that just removed a book's last file
+// (a plain delete, not only Reorganize's move) can reclaim the folder
+// afterward instead of stranding it holding nothing but a stale sidecar — the
+// same failure shape as removeOrphanedSidecar's move case, reached from
+// internal/api/books.go's delete paths instead. A folder still holding
+// another format of the book, or anything else at all, is left completely
+// alone, sidecar included. Best-effort: a failure only leaves the folder
+// behind, which is no worse than before this existed.
+func RemoveOrphanedSidecar(dir string) {
+	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 {
 		return
 	}
 	if entries[0].IsDir() || entries[0].Name() != opfSidecarFileName {
 		return
 	}
-	if err := os.Remove(filepath.Join(oldDir, opfSidecarFileName)); err != nil {
-		slog.Warn("opf sidecar: failed to remove the orphaned sidecar left by a move", "dir", oldDir, "error", err)
+	if err := os.Remove(filepath.Join(dir, opfSidecarFileName)); err != nil {
+		slog.Warn("opf sidecar: failed to remove the orphaned sidecar", "dir", dir, "error", err)
 	}
 }
 
