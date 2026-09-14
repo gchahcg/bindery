@@ -6,6 +6,59 @@ import (
 	"github.com/vavallee/bindery/internal/models"
 )
 
+// vetoFixtures maps every DefaultSignals() member's ID to a Candidate/Context
+// pair guaranteed to make it fire. TestRegistryIsVetoOnlyAtV1 uses these to
+// check the actual EMITTED observation, not just the Weight() accessor — see
+// that test's doc for why the accessor alone isn't a sufficient guard. A
+// signal added to DefaultSignals() with no matching entry here fails that
+// test explicitly (missing fixture), rather than silently skipping the
+// check, so this table has to grow with the registry.
+func vetoFixtures() map[string]struct {
+	c   Candidate
+	ctx *Context
+} {
+	pages50 := 50
+	return map[string]struct {
+		c   Candidate
+		ctx *Context
+	}{
+		"mediatype.strictMismatch": {
+			c:   Candidate{Book: &models.Book{MediaType: models.MediaTypeAudiobook}},
+			ctx: &Context{StrictMediaType: true, MediaTypeDefault: models.MediaTypeEbook},
+		},
+		"junk.titleEmptyOrAuthorName": {
+			c:   Candidate{Book: &models.Book{Title: ""}},
+			ctx: &Context{},
+		},
+		"junk.providerFlaggedNoise": {
+			c: Candidate{Book: &models.Book{Observations: []models.FilterObservation{
+				{Signal: models.SignalProviderOpenLibraryNoise, Reason: "test fixture"},
+			}}},
+			ctx: &Context{},
+		},
+		"language.notAllowed": {
+			c:   Candidate{Book: &models.Book{Language: "fre"}},
+			ctx: &Context{AllowedLanguages: []string{"eng"}},
+		},
+		"structure.partBookTitle": {
+			c:   Candidate{Book: &models.Book{Title: "The Foo Trilogy Boxed Set"}},
+			ctx: &Context{SkipPartBooks: true},
+		},
+		"catalog.missingReleaseDate": {
+			c:   Candidate{Book: &models.Book{ReleaseDate: nil}},
+			ctx: &Context{SkipMissingDate: true},
+		},
+		"catalog.missingISBN": {
+			c:   Candidate{Book: &models.Book{}, Editions: nil},
+			ctx: &Context{SkipMissingISBN: true},
+		},
+		"catalog.belowMinPages": {
+			c:   Candidate{Book: &models.Book{}, Editions: []models.Edition{{NumPages: &pages50}}},
+			ctx: &Context{MinPages: 200},
+		},
+	}
+}
+
 // TestRegistryIsVetoOnlyAtV1 guards the parity default. Migration 086 ships
 // keep_threshold = exclude_threshold = 0 for every existing metadata
 // profile, which only reproduces the pre-#2235 boolean chain's keep/exclude
@@ -14,13 +67,31 @@ import (
 // (positive weight) signal in DefaultSignals without also revisiting the
 // shipped thresholds is a silent behavior change for every existing user's
 // profile, so it fails here instead of shipping quietly.
+//
+// Checks the signal's Weight() accessor AND the Weight/Confidence on the
+// observation it actually emits when triggered (via vetoFixtures + the same
+// fires() helper the per-signal tests use) — a signal could in principle
+// report a veto-looking Weight() while its Observe method emits an
+// observation carrying a different (graded) Weight value, decoupled from
+// what the accessor claims. The accessor alone doesn't catch that; this
+// does.
 func TestRegistryIsVetoOnlyAtV1(t *testing.T) {
+	fixtures := vetoFixtures()
 	for _, s := range DefaultSignals() {
 		if w := s.Weight(); w != -vetoWeight {
 			t.Errorf("signal %q has weight %v, want exactly %v (v1 registry must be veto-only) — "+
 				"if you're intentionally adding a graded or keep-direction signal, migration 086's "+
 				"keep_threshold/exclude_threshold defaults must move with it, not stay implicit",
 				s.ID(), w, -vetoWeight)
+		}
+		fixture, ok := fixtures[s.ID()]
+		if !ok {
+			t.Errorf("signal %q has no entry in vetoFixtures — add one so its emitted observation's "+
+				"Weight/Confidence, not just Weight(), gets checked", s.ID())
+			continue
+		}
+		if !fires(t, s, fixture.c, fixture.ctx) {
+			t.Errorf("signal %q's vetoFixtures entry did not actually fire — fixture is stale or wrong", s.ID())
 		}
 	}
 }

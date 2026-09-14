@@ -47,9 +47,11 @@ func TestMetaProfileCreate_DefaultsAllowedLanguages(t *testing.T) {
 
 // TestMetaProfileCreate_RejectsInvertedThresholds and
 // TestMetaProfileCreate_RejectsNonEqualThresholds are the regression tests
-// for validateScoreThresholds (#2235, migration 086). At v1
-// exclude_threshold must equal keep_threshold — see that function's doc for
-// why a wider band is rejected rather than silently accepted-but-unused.
+// for validateScoreThresholds (#2235, migration 086). At v1 both
+// keep_threshold and exclude_threshold must be exactly 0 — not merely equal
+// to each other, see TestMetaProfileCreate_RejectsNonZeroEqualThresholds
+// below and validateScoreThresholds's own doc for why "equal" alone isn't
+// the actual rule.
 func TestMetaProfileCreate_RejectsInvertedThresholds(t *testing.T) {
 	h, _, _ := metaProfileFixture(t)
 	body := bytes.NewBufferString(`{"name":"Inverted","keepThreshold":-10,"excludeThreshold":10}`)
@@ -66,7 +68,7 @@ func TestMetaProfileCreate_RejectsNonEqualThresholds(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.Create(rec, httptest.NewRequest(http.MethodPost, "/api/v1/metadata-profile", body))
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for exclude != keep at v1, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 400 for a nonzero threshold pair at v1, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -109,7 +111,7 @@ func TestMetaProfileUpdate_RejectsNonEqualThresholds(t *testing.T) {
 	req = withURLParam(req, "id", strconv.FormatInt(p.ID, 10))
 	h.Update(rec, req)
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for exclude != keep on update, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 400 for a nonzero keepThreshold on update, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

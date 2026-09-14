@@ -2982,8 +2982,7 @@ func latestBookMonitorKeys(books []models.Book, count int, include func(models.B
 // first time; this keeps them out of it, which is what the pre-#2235 behavior
 // was.
 func isAuthorWorkMonitorCandidate(book models.Book, normalizedAuthor string, allowedLangs []string, unknownFail bool) bool {
-	normalizedTitle := strings.ToLower(strings.TrimSpace(book.Title))
-	if normalizedTitle == "" || normalizedTitle == normalizedAuthor {
+	if filterengine.IsJunkTitle(book.Title, normalizedAuthor) {
 		return false
 	}
 	if models.HasObservation(book.Observations, models.SignalProviderOpenLibraryNoise) {

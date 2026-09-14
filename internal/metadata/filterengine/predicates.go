@@ -19,6 +19,25 @@ func IsPartBookTitle(title string) bool {
 	return metadata.IsBundleTitle(title)
 }
 
+// IsJunkTitle reports whether title is empty or is just the author's own
+// name — a recurring OpenLibrary data-quality problem where a Work record
+// was never titled and falls back to the author's name. normalizedAuthor
+// must already be lowercased/trimmed by the caller (matching Context's own
+// NormalizedAuthor convention); title is normalized here the same way
+// before comparing.
+//
+// This is the one shared implementation for JunkTitleSignal.Observe below
+// and internal/api's isAuthorWorkMonitorCandidate and
+// reconciliationRejectReason, which independently inlined the identical
+// check before this consolidation (#2235 PR review) — per this PR's own
+// "wrap, don't reimplement" rule applied to itself, the same discipline
+// IsPartBookTitle/AnyEditionHasISBN/PassesMinPagesFilter above already
+// follow.
+func IsJunkTitle(title, normalizedAuthor string) bool {
+	normalizedTitle := strings.ToLower(strings.TrimSpace(title))
+	return normalizedTitle == "" || normalizedTitle == normalizedAuthor
+}
+
 // AnyEditionHasISBN reports whether any edition carries an ISBN-13 or
 // ISBN-10. Returns false for a nil or empty slice — a work with no editions
 // to check has no ISBN to confirm. Relocated from

@@ -17,6 +17,7 @@ import (
 	"github.com/vavallee/bindery/internal/concurrency"
 	"github.com/vavallee/bindery/internal/indexer"
 	"github.com/vavallee/bindery/internal/metadata"
+	"github.com/vavallee/bindery/internal/metadata/filterengine"
 	"github.com/vavallee/bindery/internal/models"
 )
 
@@ -396,8 +397,7 @@ func (h *AuthorHandler) buildCatalogueReconciliation(ctx context.Context, author
 }
 
 func reconciliationRejectReason(work models.Book, normalizedAuthor string, profile reconciliationProfile, evidence editionEvidence) (string, bool) {
-	normalizedTitle := strings.ToLower(strings.TrimSpace(work.Title))
-	if normalizedTitle == "" || normalizedTitle == normalizedAuthor || work.IsCompilation || metadata.IsUnambiguousBundleTitle(work.Title) {
+	if filterengine.IsJunkTitle(work.Title, normalizedAuthor) || work.IsCompilation || metadata.IsUnambiguousBundleTitle(work.Title) {
 		return reconcileReasonCatalogueFilter, false
 	}
 	// Provider-flagged companion material (#2235). Until #2235 OpenLibrary's
