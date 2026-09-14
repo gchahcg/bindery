@@ -37,16 +37,14 @@ func (s *ProviderNoiseSignal) Observe(c Candidate, ctx *Context) []models.Filter
 	if c.Book == nil {
 		return nil
 	}
-	for _, o := range c.Book.Observations {
-		if o.Signal != models.SignalProviderOpenLibraryNoise {
-			continue
-		}
-		return []models.FilterObservation{{
-			Signal:     s.ID(),
-			Weight:     s.weight,
-			Confidence: 1,
-			Reason:     o.Reason,
-		}}
+	o, ok := models.FindObservation(c.Book.Observations, models.SignalProviderOpenLibraryNoise)
+	if !ok {
+		return nil
 	}
-	return nil
+	return []models.FilterObservation{{
+		Signal:     s.ID(),
+		Weight:     s.weight,
+		Confidence: 1,
+		Reason:     o.Reason,
+	}}
 }

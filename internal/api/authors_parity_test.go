@@ -154,3 +154,100 @@ func TestAuthorSyncParity_NonZeroEqualThresholdsDiverge(t *testing.T) {
 			"or something else changed", sync.Added)
 	}
 }
+
+// TestAuthorSyncParity_ProviderNoiseDoesNotStealMonitorLatestSlot is the
+// regression test for a real parity break found reviewing #2235, NOT a
+// hypothetical: the branch's headline claim is that the shipped 0/0 default
+// changes no observable behavior except AuthorSyncSummary.Total, but moving
+// OpenLibrary's companion-material check from "drop in the provider client"
+// to "flag and let the engine decide" also, silently, put those works into
+// every collective-inference stage that runs over the RAW provider slice
+// before the create loop.
+//
+// latestBookMonitorKeys is the damaging one. It awards the author's
+// MonitorLatestCount slots from that raw slice, by release date, before any
+// filtering. Companion material is typically published long after the work it
+// accompanies, so a flagged study guide wins the auction, is then excluded by
+// ProviderNoiseSignal in the loop, and the real book it displaced is created
+// UNMONITORED — no auto-search, no grab, and no counter anywhere saying why.
+//
+// The fix is in isAuthorWorkMonitorCandidate: a work the create loop will
+// refuse to create must not be able to take a slot first.
+func TestAuthorSyncParity_ProviderNoiseDoesNotStealMonitorLatestSlot(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	authorRepo := db.NewAuthorRepo(database)
+	bookRepo := db.NewBookRepo(database)
+	profileRepo := db.NewMetadataProfileRepo(database)
+
+	author := &models.Author{
+		ForeignID: "OL-NOISE-AUTHOR", Name: "Noisy Author", SortName: "Author, Noisy",
+		MetadataProvider:   "openlibrary",
+		Monitored:          true,
+		MonitorMode:        models.AuthorMonitorModeLatest,
+		MonitorLatestCount: 1,
+		MonitorNewItems:    models.AuthorMonitorNewItemsAll,
+	}
+	if err := authorRepo.Create(ctx, author); err != nil {
+		t.Fatal(err)
+	}
+
+	older := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)
+	stub := &stubMetaProvider{works: []models.Book{
+		{ForeignID: "OL-REAL", Title: "A Real Novel", SortTitle: "A Real Novel", Language: "eng",
+			ReleaseDate: &older, Status: models.BookStatusWanted, MetadataProvider: "openlibrary", Genres: []string{}},
+		// Flagged companion material, newer than the real work. Pre-#2235 the
+		// OpenLibrary client dropped this before fetchAuthorBooks saw it.
+		{ForeignID: "OL-NOISE", Title: "Cliffsnotes on A Real Novel", SortTitle: "Cliffsnotes on A Real Novel",
+			Language: "eng", ReleaseDate: &newer, Status: models.BookStatusWanted,
+			MetadataProvider: "openlibrary", Genres: []string{},
+			Observations: []models.FilterObservation{
+				{Signal: models.SignalProviderOpenLibraryNoise, Reason: `title contains the companion-material phrase "cliffsnotes"`},
+			}},
+	}}
+	h := NewAuthorHandler(authorRepo, nil, bookRepo, nil, metadata.NewAggregator(stub), nil, profileRepo, nil)
+	h.FetchAuthorBooks(author, false, "")
+
+	books, err := bookRepo.ListByAuthor(ctx, author.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(books) != 1 || books[0].Title != "A Real Novel" {
+		t.Fatalf("books = %+v, want exactly the one real novel (the flagged work must not be created)", books)
+	}
+	if !books[0].Monitored {
+		t.Error("the real novel was created unmonitored: a provider-flagged companion-material work " +
+			"took the author's only monitor-latest slot, which it could not do before #2235")
+	}
+}
+
+// TestApplyAuthorMajorityLanguageFallback_IgnoresProviderNoise pins the
+// second collective-inference stage the same #2235 change leaked into. The
+// majority-language vote also runs over the raw provider slice, so a run of
+// English-language companion material could newly carry an otherwise
+// non-dominant language over the dominance threshold — changing which real
+// works get a language assigned, and therefore which ones the language filter
+// then drops.
+func TestApplyAuthorMajorityLanguageFallback_IgnoresProviderNoise(t *testing.T) {
+	noise := []models.FilterObservation{{Signal: models.SignalProviderOpenLibraryNoise, Reason: "companion material"}}
+	books := []models.Book{
+		{ForeignID: "1", Language: "fre"},
+		{ForeignID: "2", Language: "fre"},
+		{ForeignID: "3", Language: "eng", Observations: noise},
+		{ForeignID: "4", Language: "eng", Observations: noise},
+		{ForeignID: "5", Language: "eng", Observations: noise},
+		{ForeignID: "6", Language: "eng", Observations: noise},
+		{ForeignID: "7", Language: ""},
+	}
+	applyAuthorMajorityLanguageFallback(books)
+	if books[6].Language != "" {
+		t.Errorf("unresolved work was assigned %q: only 2 real works are resolved, which is below the "+
+			"minimum sample — the four flagged companion-material works must not vote", books[6].Language)
+	}
+}
