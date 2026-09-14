@@ -71,6 +71,10 @@ func (h *MetadataProfileHandler) Create(w http.ResponseWriter, r *http.Request) 
 	if p.UnknownLanguageBehavior != models.UnknownLanguageFail {
 		p.UnknownLanguageBehavior = models.UnknownLanguagePass
 	}
+	if msg, ok := validateScoreThresholds(p); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+		return
+	}
 	if err := h.repo.CreateForUser(r.Context(), &p, auth.UserIDFromContext(r.Context())); err != nil {
 		writeServerError(w, r, err)
 		return
@@ -103,6 +107,10 @@ func (h *MetadataProfileHandler) Update(w http.ResponseWriter, r *http.Request) 
 	if p.UnknownLanguageBehavior != models.UnknownLanguageFail {
 		p.UnknownLanguageBehavior = models.UnknownLanguagePass
 	}
+	if msg, ok := validateScoreThresholds(p); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+		return
+	}
 	if err := h.repo.Update(r.Context(), &p); err != nil {
 		writeServerError(w, r, err)
 		return
@@ -132,4 +140,27 @@ func (h *MetadataProfileHandler) Delete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// validateScoreThresholds enforces internal/metadata/filterengine's v1
+// constraint on a profile's KeepThreshold/ExcludeThreshold pair (#2235,
+// migration 086). An inverted band (exclude above keep) is meaningless in
+// any version of this scheme, so it's always rejected. At v1 specifically,
+// exclude != keep is rejected too — not because a wider band is unsafe, but
+// because nothing populates it meaningfully yet: every shipped signal is a
+// veto (see filterengine.TestRegistryIsVetoOnlyAtV1), so a REVIEW band would
+// exist with nothing graded enough to land a candidate inside it, and there
+// is no UI surface to show one on if it did. Relaxing this to `exclude <=
+// keep` is the one-line change that turns on graded filtering once a real
+// graded signal (the cluster-level edition-count signal cluster.go's doc
+// describes) is proven in — deliberately left as a one-line follow-up
+// rather than done speculatively here.
+func validateScoreThresholds(p models.MetadataProfile) (msg string, ok bool) {
+	if p.ExcludeThreshold > p.KeepThreshold {
+		return "excludeThreshold cannot be greater than keepThreshold", false
+	}
+	if p.ExcludeThreshold != p.KeepThreshold {
+		return "excludeThreshold must equal keepThreshold; graded filtering (a non-empty review band) isn't enabled yet", false
+	}
+	return "", true
 }
