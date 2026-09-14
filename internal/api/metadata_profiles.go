@@ -145,22 +145,31 @@ func (h *MetadataProfileHandler) Delete(w http.ResponseWriter, r *http.Request) 
 // validateScoreThresholds enforces internal/metadata/filterengine's v1
 // constraint on a profile's KeepThreshold/ExcludeThreshold pair (#2235,
 // migration 086). An inverted band (exclude above keep) is meaningless in
-// any version of this scheme, so it's always rejected. At v1 specifically,
-// exclude != keep is rejected too — not because a wider band is unsafe, but
-// because nothing populates it meaningfully yet: every shipped signal is a
-// veto (see filterengine.TestRegistryIsVetoOnlyAtV1), so a REVIEW band would
-// exist with nothing graded enough to land a candidate inside it, and there
-// is no UI surface to show one on if it did. Relaxing this to `exclude <=
-// keep` is the one-line change that turns on graded filtering once a real
-// graded signal (the cluster-level edition-count signal cluster.go's doc
-// describes) is proven in — deliberately left as a one-line follow-up
-// rather than done speculatively here.
+// any version of this scheme, so it's always rejected.
+//
+// At v1 specifically, both must be exactly 0 — not merely equal to each
+// other. This is tighter than "keep == exclude" and deliberately so: every
+// shipped signal is a veto (filterengine.TestRegistryIsVetoOnlyAtV1) with
+// Context.Prior hardcoded to 0, so an unfiltered candidate always scores
+// exactly 0 and a vetoed one always scores exactly -vetoWeight. Parity with
+// the pre-#2235 boolean chain depends on the shared threshold sitting
+// exactly at that clean-candidate score: a nonzero equal pair (say
+// keep=exclude=50) would band a perfectly clean candidate (score 0) as
+// EXCLUDE, since 0 < 50 — a real bug caught by
+// TestAuthorSyncParity_EqualThresholdsReproduceBooleanChain rejecting
+// exactly this, not a hypothetical. "keep == exclude" alone is necessary
+// but not sufficient; "== 0" is what the current Prior/veto-weight design
+// actually requires. Relaxing this — to a nonzero equal pair, or further to
+// `exclude <= keep` for real graded filtering — is meaningful only once
+// Context.Prior is itself profile-configurable or a real graded signal
+// (the cluster-level edition-count signal cluster.go's doc describes)
+// exists to justify moving off the veto-only design this locks in.
 func validateScoreThresholds(p models.MetadataProfile) (msg string, ok bool) {
 	if p.ExcludeThreshold > p.KeepThreshold {
 		return "excludeThreshold cannot be greater than keepThreshold", false
 	}
-	if p.ExcludeThreshold != p.KeepThreshold {
-		return "excludeThreshold must equal keepThreshold; graded filtering (a non-empty review band) isn't enabled yet", false
+	if p.KeepThreshold != 0 || p.ExcludeThreshold != 0 {
+		return "keepThreshold and excludeThreshold must both be 0; graded filtering isn't enabled yet", false
 	}
 	return "", true
 }

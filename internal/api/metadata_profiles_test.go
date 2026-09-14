@@ -70,6 +70,23 @@ func TestMetaProfileCreate_RejectsNonEqualThresholds(t *testing.T) {
 	}
 }
 
+// TestMetaProfileCreate_RejectsNonZeroEqualThresholds pins the corrected
+// (tightened) validateScoreThresholds rule: equal is not enough, both must
+// be exactly 0 at v1. See TestAuthorSyncParity_NonZeroEqualThresholdsDiverge
+// (authors_parity_test.go) for the end-to-end scenario that caught the
+// original (equal-only) version of this check as insufficient — a
+// keep=exclude=50 profile passed that check yet excluded every candidate,
+// filtered or not.
+func TestMetaProfileCreate_RejectsNonZeroEqualThresholds(t *testing.T) {
+	h, _, _ := metaProfileFixture(t)
+	body := bytes.NewBufferString(`{"name":"StillBroken","keepThreshold":50,"excludeThreshold":50}`)
+	rec := httptest.NewRecorder()
+	h.Create(rec, httptest.NewRequest(http.MethodPost, "/api/v1/metadata-profile", body))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for a nonzero equal threshold pair, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestMetaProfileCreate_AcceptsEqualThresholds(t *testing.T) {
 	h, _, _ := metaProfileFixture(t)
 	body := bytes.NewBufferString(`{"name":"Parity","keepThreshold":0,"excludeThreshold":0}`)
