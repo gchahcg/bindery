@@ -2967,9 +2967,26 @@ func latestBookMonitorKeys(books []models.Book, count int, include func(models.B
 	return keys
 }
 
+// isAuthorWorkMonitorCandidate mirrors, for the "monitor latest N" slot
+// auction, exactly the filters fetchAuthorBooks's create loop applies before a
+// work can become a book: junk title, provider-flagged companion material, and
+// the profile's language set. Anything the loop will refuse to create must not
+// be allowed to occupy one of the N slots first — the slots are awarded from
+// the raw provider list, before the loop runs, so a work that takes one and is
+// then excluded leaves a real book silently unmonitored.
+//
+// The provider-noise clause is #2235's: before it, OpenLibrary's
+// companion-material check ran inside the provider client and these works
+// never reached this function at all. Flagging instead of dropping them (so
+// they count in AuthorSyncSummary.Total) put them into the auction for the
+// first time; this keeps them out of it, which is what the pre-#2235 behavior
+// was.
 func isAuthorWorkMonitorCandidate(book models.Book, normalizedAuthor string, allowedLangs []string, unknownFail bool) bool {
 	normalizedTitle := strings.ToLower(strings.TrimSpace(book.Title))
 	if normalizedTitle == "" || normalizedTitle == normalizedAuthor {
+		return false
+	}
+	if models.HasObservation(book.Observations, models.SignalProviderOpenLibraryNoise) {
 		return false
 	}
 	return models.IsLanguageAllowed(book.Language, allowedLangs, unknownFail)
@@ -3793,11 +3810,24 @@ const authorMajorityLanguageThreshold = 0.9
 // least authorMajorityLanguageMinSample resolved works. Mutates books in
 // place. A no-op when too few works have a resolved language yet, or when
 // no single language dominates strongly enough to trust.
+//
+// Provider-flagged companion material is excluded from the vote (#2235).
+// These works used to be dropped inside the provider client and never reached
+// this function; flagging rather than dropping them (so they count in
+// AuthorSyncSummary.Total) would otherwise let a run of English-language study
+// guides skew both the min-sample gate and the dominance ratio for an author
+// whose real catalogue is another language — changing which real works get a
+// language assigned, and therefore which ones the language filter then drops.
+// They are still ASSIGNED the majority language if they lack one, which costs
+// nothing: the noise signal excludes them before the language check runs.
 func applyAuthorMajorityLanguageFallback(books []models.Book) {
 	counts := make(map[string]int, 4)
 	resolved := 0
 	for _, b := range books {
 		if b.Language == "" {
+			continue
+		}
+		if models.HasObservation(b.Observations, models.SignalProviderOpenLibraryNoise) {
 			continue
 		}
 		counts[b.Language]++

@@ -51,6 +51,27 @@ type FilterObservation struct {
 // direction, providers stay engine-agnostic in this one.
 const SignalProviderOpenLibraryNoise = "provider.openlibraryCompanionMaterial"
 
+// FindObservation returns the first observation in obs emitted by the named
+// signal. It is the one lookup every consumer of a provider-stamped claim
+// shares: internal/metadata/filterengine's ProviderNoiseSignal (which needs
+// the matched Reason) and internal/api's collective-inference stages (which
+// only need to know the claim is there, so they can leave a flagged work out
+// of a vote it was never part of before #2235).
+func FindObservation(obs []FilterObservation, signal string) (FilterObservation, bool) {
+	for _, o := range obs {
+		if o.Signal == signal {
+			return o, true
+		}
+	}
+	return FilterObservation{}, false
+}
+
+// HasObservation reports whether obs carries a claim from the named signal.
+func HasObservation(obs []FilterObservation, signal string) bool {
+	_, ok := FindObservation(obs, signal)
+	return ok
+}
+
 // Contribution is this observation's contribution to a candidate's score:
 // Weight * Confidence.
 func (o FilterObservation) Contribution() float64 {
