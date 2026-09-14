@@ -45,6 +45,57 @@ func TestMetaProfileCreate_DefaultsAllowedLanguages(t *testing.T) {
 	}
 }
 
+// TestMetaProfileCreate_RejectsInvertedThresholds and
+// TestMetaProfileCreate_RejectsNonEqualThresholds are the regression tests
+// for validateScoreThresholds (#2235, migration 086). At v1
+// exclude_threshold must equal keep_threshold — see that function's doc for
+// why a wider band is rejected rather than silently accepted-but-unused.
+func TestMetaProfileCreate_RejectsInvertedThresholds(t *testing.T) {
+	h, _, _ := metaProfileFixture(t)
+	body := bytes.NewBufferString(`{"name":"Inverted","keepThreshold":-10,"excludeThreshold":10}`)
+	rec := httptest.NewRecorder()
+	h.Create(rec, httptest.NewRequest(http.MethodPost, "/api/v1/metadata-profile", body))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for exclude > keep, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMetaProfileCreate_RejectsNonEqualThresholds(t *testing.T) {
+	h, _, _ := metaProfileFixture(t)
+	body := bytes.NewBufferString(`{"name":"Graded","keepThreshold":10,"excludeThreshold":-10}`)
+	rec := httptest.NewRecorder()
+	h.Create(rec, httptest.NewRequest(http.MethodPost, "/api/v1/metadata-profile", body))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for exclude != keep at v1, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMetaProfileCreate_AcceptsEqualThresholds(t *testing.T) {
+	h, _, _ := metaProfileFixture(t)
+	body := bytes.NewBufferString(`{"name":"Parity","keepThreshold":0,"excludeThreshold":0}`)
+	rec := httptest.NewRecorder()
+	h.Create(rec, httptest.NewRequest(http.MethodPost, "/api/v1/metadata-profile", body))
+	if rec.Code != http.StatusCreated {
+		t.Errorf("expected 201 for keep == exclude, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMetaProfileUpdate_RejectsNonEqualThresholds(t *testing.T) {
+	h, repo, ctx := metaProfileFixture(t)
+	p := &models.MetadataProfile{Name: "Original", AllowedLanguages: "eng"}
+	if err := repo.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.NewBufferString(`{"name":"Original","keepThreshold":5,"excludeThreshold":0}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/metadata-profile/"+strconv.FormatInt(p.ID, 10), body)
+	req = withURLParam(req, "id", strconv.FormatInt(p.ID, 10))
+	h.Update(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for exclude != keep on update, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestMetaProfileCreate_RequiresName(t *testing.T) {
 	h, _, _ := metaProfileFixture(t)
 	body := bytes.NewBufferString(`{"allowedLanguages":"eng"}`)
