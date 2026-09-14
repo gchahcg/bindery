@@ -54,6 +54,7 @@ func TestDefaultRegistry_MatchesDefaultSignalsOrder(t *testing.T) {
 	want := []string{
 		"mediatype.strictMismatch",
 		"junk.titleEmptyOrAuthorName",
+		"junk.providerFlaggedNoise",
 		"language.notAllowed",
 		"structure.partBookTitle",
 		"catalog.missingReleaseDate",

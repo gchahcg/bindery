@@ -436,9 +436,6 @@ func (c *Client) authorWorks(ctx context.Context, authorForeignID string) (books
 		if workID == "" || entry.Title == "" {
 			continue
 		}
-		if shouldFilterOLNoise(entry.Title, entry.Subjects) {
-			continue
-		}
 		b := models.Book{
 			ForeignID:        workID,
 			Title:            entry.Title,
@@ -453,6 +450,21 @@ func (c *Client) authorWorks(ctx context.Context, authorForeignID string) (books
 				ForeignID:        authorForeignID,
 				MetadataProvider: "openlibrary",
 			},
+		}
+		// Flag rather than drop (#2235): previously shouldFilterOLNoise
+		// dropped the work here, silently, before it ever reached Total —
+		// internal/api/authors.go's AuthorSyncSummary.Total counts only
+		// what a provider returns, so this work was invisible to the sync
+		// accounting entirely. Now it survives as a real candidate carrying
+		// the reason, and internal/metadata/filterengine's
+		// ProviderNoiseSignal decides its fate at the same veto weight the
+		// old inline drop effectively used — checked against entry.Subjects
+		// (the untruncated list), not b.Genres (capped at 10 above).
+		if reason := olNoiseMatchReason(entry.Title, entry.Subjects); reason != "" {
+			b.Observations = append(b.Observations, models.FilterObservation{
+				Signal: models.SignalProviderOpenLibraryNoise,
+				Reason: reason,
+			})
 		}
 		for _, a := range entry.Authors {
 			if key := strings.TrimPrefix(a.Author.Key, "/authors/"); key != "" {
@@ -505,8 +517,17 @@ func (c *Client) authorWorks(ctx context.Context, authorForeignID string) (books
 		if _, ok := index[e.ForeignID]; ok {
 			continue // already handled above
 		}
-		if shouldFilterOLNoise(e.Title, e.Genres) {
-			continue
+		// Flag rather than drop (#2235) — see the primary loop above for the
+		// full rationale. e.Genres is already the 10-item-truncated form
+		// (this entry IS a models.Book, built by searchAuthorWorks), same as
+		// the pre-#2235 boolean check here always compared against — no
+		// fidelity regression, just no fidelity gain either, unlike the
+		// primary-entry call site above.
+		if reason := olNoiseMatchReason(e.Title, e.Genres); reason != "" {
+			e.Observations = append(e.Observations, models.FilterObservation{
+				Signal: models.SignalProviderOpenLibraryNoise,
+				Reason: reason,
+			})
 		}
 		e.Author = &models.Author{
 			ForeignID:        authorForeignID,
@@ -742,22 +763,36 @@ var olNoiseTitleFragments = []string{
 // companion material (study guide, summary, adaptation, audio-CD edition)
 // rather than a real authored work. The goal is to keep an author's
 // catalogue clean without being aggressive enough to drop legitimate works.
+// The boolean form of olNoiseMatchReason.
 func shouldFilterOLNoise(title string, subjects []string) bool {
+	return olNoiseMatchReason(title, subjects) != ""
+}
+
+// olNoiseMatchReason returns the matched noise pattern — a title fragment or
+// a subject phrase — when title/subjects look like companion material, or ""
+// when nothing matched. Same detection as shouldFilterOLNoise; this form
+// exists so a caller that no longer drops the work outright (#2235: the work
+// is kept and flagged via a Book.Observations entry instead — see this
+// file's two callers) can still say WHY it flagged it, at full subject
+// fidelity (the caller passes the untruncated subjects list, not the
+// 10-item-capped models.Book.Genres a downstream signal would otherwise be
+// limited to).
+func olNoiseMatchReason(title string, subjects []string) string {
 	lt := strings.ToLower(title)
 	for _, f := range olNoiseTitleFragments {
 		if strings.Contains(lt, f) {
-			return true
+			return fmt.Sprintf("title contains the companion-material phrase %q", f)
 		}
 	}
 	for _, s := range subjects {
 		ls := strings.ToLower(s)
 		for _, n := range olNoiseSubjects {
 			if strings.Contains(ls, n) {
-				return true
+				return fmt.Sprintf("subject %q matches the companion-material phrase %q", s, n)
 			}
 		}
 	}
-	return false
+	return ""
 }
 
 // GetEditions fetches a work's editions from /works/{id}/editions.json.

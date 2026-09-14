@@ -2258,8 +2258,18 @@ func (h *AuthorHandler) fetchAuthorBooks(ctx context.Context, author *models.Aut
 		// nonsense destination folders like "Jared M. Diamond/Jared M. Diamond ()".
 		//
 		// Ported to filterengine.JunkTitleSignal (#2235); wraps the same
-		// normalizedTitle comparison this used to do inline.
-		if result := filterengine.Decide(filterengine.Candidate{Book: &b}, fCtx, filterengine.NewJunkTitleSignal()); result.Band == filterengine.BandExclude {
+		// normalizedTitle comparison this used to do inline. Scored together
+		// with ProviderNoiseSignal, which replays a provider-flagged
+		// companion-material claim (e.g. OpenLibrary's olNoiseMatchReason) —
+		// pre-#2235 that check ran unilaterally inside the OpenLibrary
+		// client and dropped the work before it ever reached this handler,
+		// so it never entered Total's accounting. Now it does: an
+		// OpenLibrary-primary author's Total can be visibly higher than
+		// before this change for exactly the works that used to be
+		// invisibly eaten. Both route to the same SkippedJunk counter —
+		// there was never a separate counter for the provider-side check,
+		// and this is its nearest existing semantic.
+		if result := filterengine.Decide(filterengine.Candidate{Book: &b}, fCtx, filterengine.NewJunkTitleSignal(), filterengine.NewProviderNoiseSignal()); result.Band == filterengine.BandExclude {
 			skippedJunk++
 			slog.Debug("skipping junk-title OL work", "title", b.Title, "foreignId", b.ForeignID, "reason", filterEngineReason(result))
 			continue

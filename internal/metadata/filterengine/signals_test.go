@@ -163,6 +163,35 @@ func TestMissingISBNSignal(t *testing.T) {
 	}
 }
 
+func TestProviderNoiseSignal(t *testing.T) {
+	s := NewProviderNoiseSignal()
+	ctx := &Context{}
+
+	clean := &models.Book{Title: "A Real Book"}
+	if got := fires(t, s, Candidate{Book: clean}, ctx); got {
+		t.Error("clean book with no provider observations should not fire")
+	}
+
+	flagged := &models.Book{
+		Title: "Cliffsnotes on A Real Book",
+		Observations: []models.FilterObservation{
+			{Signal: models.SignalProviderOpenLibraryNoise, Reason: `title contains "cliffsnotes"`},
+		},
+	}
+	if got := fires(t, s, Candidate{Book: flagged}, ctx); !got {
+		t.Error("book carrying a SignalProviderOpenLibraryNoise observation should fire")
+	}
+
+	unrelated := &models.Book{
+		Observations: []models.FilterObservation{
+			{Signal: "some.other.provider.signal", Reason: "irrelevant"},
+		},
+	}
+	if got := fires(t, s, Candidate{Book: unrelated}, ctx); got {
+		t.Error("an unrelated observation on the book must not make this signal fire")
+	}
+}
+
 func TestMinPagesSignal(t *testing.T) {
 	pages300 := 300
 	pages50 := 50

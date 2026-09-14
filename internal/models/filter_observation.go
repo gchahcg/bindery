@@ -40,6 +40,17 @@ type FilterObservation struct {
 	Reason string `json:"reason"`
 }
 
+// SignalProviderOpenLibraryNoise is the Signal string a provider stamps on
+// Book.Observations when it detects companion material (study guide,
+// summary, adaptation, audio-CD edition) rather than dropping the work
+// outright (#2235) — see internal/metadata/openlibrary's olNoiseMatchReason,
+// the sole producer, and internal/metadata/filterengine's
+// ProviderNoiseSignal, the sole consumer. Lives in models (not
+// filterengine) so a provider client can write it without importing the
+// scoring engine — the engine stays provider-agnostic in the other
+// direction, providers stay engine-agnostic in this one.
+const SignalProviderOpenLibraryNoise = "provider.openlibraryCompanionMaterial"
+
 // Contribution is this observation's contribution to a candidate's score:
 // Weight * Confidence.
 func (o FilterObservation) Contribution() float64 {
