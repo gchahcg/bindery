@@ -10,24 +10,25 @@ import (
 	"github.com/vavallee/bindery/internal/models"
 )
 
-// TestAuthorSyncParity_ShippedDefaultReproducesBooleanChain is the golden
-// parity gate for #2235's filterengine wiring into fetchAuthorBooks.
-//
-// TestAuthorSyncSummaryReconciles (author_sync_reconcile_test.go) already
+// TestAuthorSyncParity_DefaultVetoWeightsMatchExpectedCounts is a small,
+// hardcoded-expectation fixture (3 works, one each tripping language and
+// junk-title) at the exact migration-086 shipped default (keep_threshold =
+// exclude_threshold = 0). It is NOT the golden comparison against the
+// pre-#2235 boolean chain — that claim belongs to
+// TestAuthorSyncSummaryReconciles (author_sync_reconcile_test.go), which
 // exercises every ported signal at once against a catalogue built to trip
-// each one, asserting an exact expected count per Skipped* counter — it
-// passed unmodified once filterengine replaced the inline boolean checks,
-// which is itself strong evidence the wiring didn't shift behavior. This
-// test pins the same property at the exact migration-086 shipped default
-// (keep_threshold = exclude_threshold = 0) via a separate, smaller fixture,
-// as an independent confirmation.
+// each one and passed UNMODIFIED once filterengine replaced the inline
+// boolean checks; that's the actual evidence the wiring didn't shift
+// behavior. This test only pins that a small, easy-to-read fixture produces
+// the counts you'd expect at the shipped default, as a second, independent
+// data point — not a re-derivation of parity from first principles.
 //
 // This test does NOT sweep other equal threshold pairs — see
 // TestAuthorSyncParity_NonZeroEqualThresholdsDiverge below for why "keep ==
 // exclude" alone is not the actual parity invariant, and
 // validateScoreThresholds (internal/api/metadata_profiles.go) enforces the
 // narrower one this test relies on.
-func TestAuthorSyncParity_ShippedDefaultReproducesBooleanChain(t *testing.T) {
+func TestAuthorSyncParity_DefaultVetoWeightsMatchExpectedCounts(t *testing.T) {
 	released := time.Date(2020, 3, 1, 0, 0, 0, 0, time.UTC)
 	baseWorks := []models.Book{
 		{ForeignID: "OL-keep", Title: "A Real Book", SortTitle: "A Real Book", Language: "eng",
