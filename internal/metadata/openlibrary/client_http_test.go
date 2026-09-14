@@ -924,6 +924,7 @@ func TestGetAuthorWorks_HTTP(t *testing.T) {
 				Key:              "/works/OL456W",
 				Title:            "Dune",
 				Language:         []string{"eng"},
+				EditionCount:     317,
 				FirstPublishYear: 1965,
 				CoverI:           &coverI,
 				Subject:          []string{"Sci-Fi"},
@@ -953,6 +954,13 @@ func TestGetAuthorWorks_HTTP(t *testing.T) {
 	}
 	if books[0].Language != "eng" {
 		t.Errorf("first book language: want 'eng', got %q", books[0].Language)
+	}
+	// Regression for #2235: EditionCount was decoded from the search
+	// response but never assigned to the resulting models.Book, which left
+	// it at 0 for every OpenLibrary-sourced work regardless of what the
+	// provider actually reported.
+	if books[0].EditionCount != 317 {
+		t.Errorf("first book EditionCount: want 317, got %d", books[0].EditionCount)
 	}
 	if !strings.Contains(books[0].ImageURL, "12345") {
 		t.Errorf("first book ImageURL should contain cover 12345, got %q", books[0].ImageURL)

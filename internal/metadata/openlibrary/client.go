@@ -453,6 +453,16 @@ func (c *Client) GetAuthorWorksSnapshot(ctx context.Context, authorForeignID str
 				b.RatingsCount = e.RatingsCount
 				b.AverageRating = e.AverageRating
 			}
+			// The works endpoint (primary) carries no edition_count at all;
+			// only the search endpoint (enrichment) does. Without this, a
+			// work present in BOTH sources — the common case for an
+			// established author — took the primary-derived b, which never
+			// had EditionCount, and silently discarded enrichment's value
+			// the same way it used to discard it entirely before
+			// searchAuthorWorks itself was fixed to populate it (#2235).
+			if e.EditionCount > 0 {
+				b.EditionCount = e.EditionCount
+			}
 			// Older works records sometimes omit the authors array; the
 			// search index's author_key list fills the gap (#1405).
 			if len(b.CreditedAuthorForeignIDs) == 0 {
@@ -523,11 +533,23 @@ func (c *Client) searchAuthorWorks(ctx context.Context, authorForeignID string) 
 			continue
 		}
 		b := models.Book{
-			ForeignID:                workID,
-			Title:                    doc.Title,
-			SortTitle:                doc.Title,
-			Genres:                   truncateSlice(doc.Subject, 10),
-			Language:                 pickPreferredLanguage(doc.Language),
+			ForeignID: workID,
+			Title:     doc.Title,
+			SortTitle: doc.Title,
+			Genres:    truncateSlice(doc.Subject, 10),
+			Language:  pickPreferredLanguage(doc.Language),
+			// EditionCount was decoded from the search response above but
+			// never assigned here — models.Book.EditionCount sat at its zero
+			// value for every OpenLibrary-sourced work, which silently
+			// deadened internal/metadata/aggregator_canonical.go's
+			// EditionCount-based canonical-search ranking branches and left
+			// internal/metadata/filterengine's Cluster.MaxEditionCount (the
+			// prerequisite for #2235's highest-value future signal) at 0 for
+			// every cluster. Assigning it here is a behavior change to
+			// canonical-search ranking (those branches start actually
+			// taking effect), which is expected and correct, not a side
+			// effect to hide.
+			EditionCount:             doc.EditionCount,
 			RatingsCount:             doc.RatingsCount,
 			AverageRating:            doc.RatingsAverage,
 			ProviderISBNs:            doc.ISBN,
