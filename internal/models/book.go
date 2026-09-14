@@ -103,6 +103,15 @@ type Book struct {
 	// the near-miss in #1724 that prompted the rename from ISBNs).
 	ProviderISBNs []string `json:"-"`
 
+	// Observations carries provider-emitted FilterObservations (#2235) — e.g.
+	// OpenLibrary's noise/companion-material detection, which used to drop the
+	// work silently inside the provider client. Transient like ProviderISBNs:
+	// no column, nothing persists it, populated only when a provider chooses
+	// to flag something about a work rather than dropping it outright, and
+	// consumed by internal/metadata/filterengine's replay signal so the
+	// weight stays profile-configured even for provider-sourced claims.
+	Observations []FilterObservation `json:"-"`
+
 	// Transport-only: the provider author keys credited on this work (e.g.
 	// OpenLibrary author IDs from the work's authors array). Used by the
 	// author sync to tell a legitimate co-author attachment apart from a row
