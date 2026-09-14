@@ -14,11 +14,14 @@
 -- signal is registered at any other weight without this default being
 -- revisited.
 --
--- keep_threshold == exclude_threshold is also the only value the API layer
--- (internal/api/metadata_profiles.go) accepts at v1: with no signal graded
--- enough to populate a REVIEW band meaningfully, and no UI surface for it,
--- exclude_threshold != keep_threshold is rejected outright rather than
--- silently accepted and never actually reachable.
+-- keep_threshold = exclude_threshold = 0 is also the only pair the API layer
+-- (internal/api/metadata_profiles.go) accepts at v1 — not merely an equal
+-- pair, but exactly zero: a nonzero equal pair (e.g. both 50) still bands
+-- every clean candidate as EXCLUDE, since a clean candidate's score is
+-- always exactly 0 under the current veto-only, Prior=0 design. With no
+-- signal graded enough to populate a REVIEW band meaningfully either, any
+-- other value is rejected outright rather than silently accepted and either
+-- unreachable or actively wrong.
 --
 -- REAL, not INTEGER: a future graded signal's units are not integral
 -- (Weight * Confidence, e.g. -260 * 0.35 = -91).

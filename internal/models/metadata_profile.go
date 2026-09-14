@@ -22,12 +22,14 @@ type MetadataProfile struct {
 	UnknownLanguageBehavior string `json:"unknownLanguageBehavior"`
 	// KeepThreshold and ExcludeThreshold are internal/metadata/filterengine's
 	// banding thresholds (migration 086, #2235). Both default to 0, which —
-	// with every v1 signal at veto weight — reproduces the pre-#2235 boolean
-	// filter chain's keep/exclude decision exactly. At v1 the API layer
-	// (internal/api/metadata_profiles.go) rejects any value where
-	// ExcludeThreshold != KeepThreshold: see filterengine's package doc for
-	// why the REVIEW band those two disagreeing would open up has nothing to
-	// populate it meaningfully yet.
+	// with every v1 signal at veto weight and Context.Prior hardcoded to 0 —
+	// reproduces the pre-#2235 boolean filter chain's keep/exclude decision
+	// exactly. At v1 the API layer (internal/api/metadata_profiles.go)
+	// rejects any value where either field is nonzero, not merely where they
+	// disagree: a nonzero EQUAL pair (e.g. both 50) still bands every clean
+	// candidate as EXCLUDE, since a clean candidate's score is always
+	// exactly 0. See validateScoreThresholds's doc for the full reasoning —
+	// this was a real bug in an earlier, looser version of that check.
 	KeepThreshold    float64   `json:"keepThreshold"`
 	ExcludeThreshold float64   `json:"excludeThreshold"`
 	CreatedAt        time.Time `json:"createdAt"`
