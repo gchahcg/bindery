@@ -83,6 +83,13 @@ func BuildClusters(books []models.Book) (clusters []Cluster, byForeignID map[str
 	type building struct {
 		cluster     Cluster
 		canonicalEC int
+		// seeded is deliberately a separate bool from "cluster.CanonicalID ==
+		// ''": a member seen first with an empty ForeignID is a real,
+		// already-seeded value, not "no canonical member chosen yet". Using
+		// emptiness as the seeded-check let a later member silently
+		// re-seed canonicalEC/CanonicalID outside the normal `>` comparison
+		// whenever the first-seen member's ForeignID happened to be empty.
+		seeded bool
 	}
 	order := make([]string, 0, len(books))
 	byKey := make(map[string]*building, len(books))
@@ -96,9 +103,10 @@ func BuildClusters(books []models.Book) (clusters []Cluster, byForeignID map[str
 			order = append(order, key)
 		}
 		bld.cluster.Size++
-		if bld.cluster.CanonicalID == "" {
+		if !bld.seeded {
 			bld.cluster.CanonicalID = b.ForeignID
 			bld.canonicalEC = b.EditionCount
+			bld.seeded = true
 		}
 		if b.EditionCount > bld.cluster.MaxEditionCount {
 			bld.cluster.MaxEditionCount = b.EditionCount

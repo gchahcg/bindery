@@ -79,6 +79,32 @@ func TestBuildClusters_TieKeepsFirstSeen(t *testing.T) {
 	}
 }
 
+// TestBuildClusters_EmptyForeignIDFirstSeenDoesNotReSeed pins a fix: the
+// first-seen member of a cluster having an empty ForeignID (not reachable
+// via today's only real caller, OpenLibrary, which filters empty ForeignIDs
+// before constructing a Book — but BuildClusters is exported and
+// provider-agnostic) must not let a later, lower-EditionCount member
+// silently overwrite CanonicalID/the internal canonicalEC tracker outside
+// the normal ">" comparison. MaxEditionCount was never affected by this bug
+// (computed independently every iteration); only CanonicalID selection was.
+func TestBuildClusters_EmptyForeignIDFirstSeenDoesNotReSeed(t *testing.T) {
+	books := []models.Book{
+		{ForeignID: "", Title: "X", EditionCount: 5},
+		{ForeignID: "A", Title: "X", EditionCount: 1},
+	}
+	clusters, _ := BuildClusters(books)
+	if len(clusters) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(clusters))
+	}
+	c := clusters[0]
+	if c.MaxEditionCount != 5 {
+		t.Errorf("MaxEditionCount = %d, want 5", c.MaxEditionCount)
+	}
+	if c.CanonicalID != "" {
+		t.Errorf("CanonicalID = %q, want \"\" (the higher-EditionCount member seen first, even with an empty ForeignID)", c.CanonicalID)
+	}
+}
+
 func TestBuildClusters_EmptyInput(t *testing.T) {
 	clusters, byID := BuildClusters(nil)
 	if len(clusters) != 0 || len(byID) != 0 {

@@ -352,9 +352,15 @@ func (c *Client) enrichWorkFromSearch(ctx context.Context, foreignID string, b *
 // enriches when available.
 //
 // Noise (study guides, screenplay companions, film adaptations, etc.) is
-// filtered at this layer so the authors-ingestion pipeline never sees it.
-// Both upstream calls are best-effort: as long as one returns, we proceed —
-// the other's failure is logged.
+// flagged, not filtered, at this layer (#2235): each matching work still
+// comes back in the slice, carrying a models.SignalProviderOpenLibraryNoise
+// observation for internal/metadata/filterengine's ProviderNoiseSignal to
+// act on. A caller that title-matches against this result directly, without
+// going through filterengine (internal/abs/import_upserts.go's
+// lookupUpstreamBook is the one that does today), must check
+// models.HasObservation for that signal itself — this layer no longer does
+// it for them. Both upstream calls are best-effort: as long as one returns,
+// we proceed — the other's failure is logged.
 func (c *Client) GetAuthorWorks(ctx context.Context, authorForeignID string) ([]models.Book, error) {
 	books, _, err := c.GetAuthorWorksSnapshot(ctx, authorForeignID)
 	return books, err
