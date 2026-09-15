@@ -9,6 +9,7 @@ import (
 
 	"github.com/vavallee/bindery/internal/auth"
 	"github.com/vavallee/bindery/internal/db"
+	"github.com/vavallee/bindery/internal/metadata/filterengine"
 	"github.com/vavallee/bindery/internal/models"
 )
 
@@ -71,7 +72,14 @@ func (h *MetadataProfileHandler) Create(w http.ResponseWriter, r *http.Request) 
 	if p.UnknownLanguageBehavior != models.UnknownLanguageFail {
 		p.UnknownLanguageBehavior = models.UnknownLanguagePass
 	}
+	if p.ClusterFilterPreset == "" {
+		p.ClusterFilterPreset = string(filterengine.ClusterFilterOff)
+	}
 	if msg, ok := validateScoreThresholds(p); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+		return
+	}
+	if msg, ok := validateClusterFilterPreset(p); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 		return
 	}
@@ -107,7 +115,14 @@ func (h *MetadataProfileHandler) Update(w http.ResponseWriter, r *http.Request) 
 	if p.UnknownLanguageBehavior != models.UnknownLanguageFail {
 		p.UnknownLanguageBehavior = models.UnknownLanguagePass
 	}
+	if p.ClusterFilterPreset == "" {
+		p.ClusterFilterPreset = string(filterengine.ClusterFilterOff)
+	}
 	if msg, ok := validateScoreThresholds(p); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+		return
+	}
+	if msg, ok := validateClusterFilterPreset(p); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 		return
 	}
@@ -164,6 +179,22 @@ func (h *MetadataProfileHandler) Delete(w http.ResponseWriter, r *http.Request) 
 // Context.Prior is itself profile-configurable or a real graded signal
 // (the cluster-level edition-count signal cluster.go's doc describes)
 // exists to justify moving off the veto-only design this locks in.
+// validateClusterFilterPreset rejects any clusterFilterPreset value this
+// package doesn't recognize. #2235 Phase 2 deliberately never relaxes
+// validateScoreThresholds's KeepThreshold/ExcludeThreshold check above (both
+// columns stay locked at exactly 0/0, unchanged) — a profile instead opts
+// into ClusterEditionCountSignal through this separate, closed-set preset
+// field, so a client can never hand-pick a keep/exclude pair nobody has
+// measured. filterengine.ValidClusterFilterPreset is the single source of
+// truth for the known set; this only translates a "no" into the same
+// {msg, ok} shape validateScoreThresholds already uses.
+func validateClusterFilterPreset(p models.MetadataProfile) (msg string, ok bool) {
+	if !filterengine.ValidClusterFilterPreset(filterengine.ClusterFilterPreset(p.ClusterFilterPreset)) {
+		return "clusterFilterPreset must be one of: off, conservative, balanced, aggressive", false
+	}
+	return "", true
+}
+
 func validateScoreThresholds(p models.MetadataProfile) (msg string, ok bool) {
 	if p.ExcludeThreshold > p.KeepThreshold {
 		return "excludeThreshold cannot be greater than keepThreshold", false

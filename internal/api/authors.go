@@ -1957,6 +1957,7 @@ func (h *AuthorHandler) fetchAuthorBooks(ctx context.Context, author *models.Aut
 	// default) and parse its allowed_languages CSV. Nil means "no filter".
 	allowedLangs, unknownFail := h.resolveAllowedLanguages(ctx, author)
 	skipPartBooks := h.resolveSkipPartBooks(ctx, author)
+	clusterPreset := h.resolveClusterFilterPreset(ctx, author)
 	skipMissingDate := h.resolveSkipMissingDate(ctx, author)
 	minPages, skipMissingISBN := h.resolveEditionFilters(ctx, author)
 	// Both minPages>0 and skipMissingISBN require a real edition lookup per
@@ -2000,6 +2001,22 @@ func (h *AuthorHandler) fetchAuthorBooks(ctx context.Context, author *models.Aut
 	// foreign-language book.
 	if len(allowedLangs) > 0 {
 		applyAuthorMajorityLanguageFallback(books)
+	}
+
+	// clusterByID groups books by filterengine.ClusterKey once, over the full
+	// batch, so ClusterEditionCountSignal can read each candidate's
+	// Cluster.MaxEditionCount below without a per-candidate re-scan (#2235
+	// Phase 2). Built before any prune stage that could still run below this
+	// point runs, matching the offline grid search this signal's tuning was
+	// validated against (BuildClusters(books) right after the
+	// majority-language fallback, before per-candidate filtering). Gated
+	// behind a non-"off" preset: BuildClusters is a cheap O(n) pass, but
+	// every profile ships "off" by default, and skipping it entirely keeps
+	// that default path exactly as it was before this field existed, not
+	// merely equivalent.
+	var clusterByID map[string]*filterengine.Cluster
+	if clusterPreset != filterengine.ClusterFilterOff {
+		_, clusterByID = filterengine.BuildClusters(books)
 	}
 
 	// Everything above can take minutes for a prolific author (works fetch,
@@ -2164,7 +2181,18 @@ func (h *AuthorHandler) fetchAuthorBooks(ctx context.Context, author *models.Aut
 	// profile-lookup failure, which — with every v1 signal at veto weight —
 	// is the exact value that reproduces the pre-#2235 boolean-chain
 	// behavior; see filterengine's package doc.
+	//
+	// A non-"off" clusterPreset overrides BOTH keepThreshold and
+	// excludeThreshold with the same shared value (filterengine.
+	// ThresholdForPreset's doc explains why it has to be both, not just
+	// excludeThreshold) — the profile's own KeepThreshold/ExcludeThreshold
+	// columns stay locked at 0/0 by validateScoreThresholds and are never
+	// read when a cluster preset is active.
 	keepThreshold, excludeThreshold := h.resolveScoreThresholds(ctx, author)
+	if clusterPreset != filterengine.ClusterFilterOff {
+		keepThreshold = filterengine.ThresholdForPreset(clusterPreset)
+		excludeThreshold = keepThreshold
+	}
 	fCtx := &filterengine.Context{
 		KeepThreshold:    keepThreshold,
 		ExcludeThreshold: excludeThreshold,
@@ -2207,6 +2235,18 @@ func (h *AuthorHandler) fetchAuthorBooks(ctx context.Context, author *models.Aut
 	// this function doesn't also source from DefaultSignals() could drift
 	// out of what that test guards without either one noticing.
 	freeSignals, structureSignals, editionSignals := filterEngineSignals()
+	// clusterSignal is #2235 Phase 2's ClusterEditionCountSignal, nil unless
+	// clusterPreset is non-"off" — ClusterSignalForPreset's doc requires
+	// callers to check for nil rather than appending a no-op signal.
+	// Deliberately not sourced from filterEngineSignals()/DefaultSignals():
+	// that registry backs TestRegistryIsVetoOnlyAtV1, which must stay
+	// pure-veto, so this signal is constructed separately and only joins the
+	// structural/edition pass below (never the free pass), matching where
+	// PartBookSignal already lives — that's what lets this signal's
+	// keep-direction observation offset a structure.partBookTitle veto in
+	// the same combined Decide call, the mechanism its offline validation
+	// depends on.
+	clusterSignal := filterengine.ClusterSignalForPreset(clusterPreset)
 	// mediaTypeSignalApplies/languageSignalApplies are the two free signals
 	// with a caller-level exemption filterengine can't self-check from
 	// Context alone: #1612's "an explicit single-work add must not be vetoed
@@ -2398,6 +2438,10 @@ func (h *AuthorHandler) fetchAuthorBooks(ctx context.Context, author *models.Aut
 			if editions, ok := editionsByForeignID[b.ForeignID]; ok {
 				candidate.Editions = editions
 				signals = append(signals, editionSignals...)
+			}
+			if clusterSignal != nil {
+				candidate.Cluster = clusterByID[b.ForeignID]
+				signals = append(signals, clusterSignal)
 			}
 		}
 		if result := filterengine.Decide(candidate, fCtx, signals...); result.Band == filterengine.BandExclude {
@@ -2710,6 +2754,8 @@ func (h *AuthorHandler) fetchAuthorBooks(ctx context.Context, author *models.Aut
 		SkippedMinPagesSample:    c.skippedMinPagesSample,
 		SkippedMissingISBN:       c.skippedMissingISBN,
 		SkippedMissingISBNSample: c.skippedMissingISBNSample,
+		SkippedThinCluster:       c.skippedThinCluster,
+		SkippedThinClusterSample: c.skippedThinClusterSample,
 		AllowedLanguages:         allowedLangs,
 		UnknownLanguageFail:      unknownFail,
 		SkippedLanguageSample:    c.skippedLangSample,
@@ -3888,6 +3934,28 @@ func (h *AuthorHandler) resolveScoreThresholds(ctx context.Context, author *mode
 		return 0, 0
 	}
 	return p.KeepThreshold, p.ExcludeThreshold
+}
+
+// resolveClusterFilterPreset returns the author's effective metadata
+// profile's ClusterEditionCountSignal preset (migration 087, #2235 Phase 2).
+// Defaults to ClusterFilterOff on any lookup failure, matching
+// resolveScoreThresholds's fail-toward-unfiltered-behavior stance and this
+// package's general default of "an unresolvable profile filters exactly like
+// no profile at all."
+func (h *AuthorHandler) resolveClusterFilterPreset(ctx context.Context, author *models.Author) filterengine.ClusterFilterPreset {
+	id := models.DefaultMetadataProfileID
+	if author.MetadataProfileID != nil {
+		id = *author.MetadataProfileID
+	}
+	p, err := h.profiles.GetByID(ctx, id)
+	if err != nil || p == nil {
+		return filterengine.ClusterFilterOff
+	}
+	preset := filterengine.ClusterFilterPreset(p.ClusterFilterPreset)
+	if !filterengine.ValidClusterFilterPreset(preset) {
+		return filterengine.ClusterFilterOff
+	}
+	return preset
 }
 
 // anyEditionHasISBN reports whether any edition carries an ISBN-13 or

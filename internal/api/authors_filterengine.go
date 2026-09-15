@@ -24,12 +24,17 @@ type authorSyncCounters struct {
 	skippedNotAccepted, skippedExcluded        int
 	skippedPartBooks, skippedMissingDate       int
 	skippedMinPages, skippedMissingISBN        int
+	// skippedThinCluster is #2235 Phase 2's counter (migration 087): a work
+	// dropped by ClusterEditionCountSignal's exclude branch. Always zero for
+	// a profile on the default "off" ClusterFilterPreset.
+	skippedThinCluster int
 
 	skippedLangSample        []models.AuthorSyncSkippedBook
 	skippedPartBooksSample   []models.AuthorSyncSkippedBook
 	skippedMissingDateSample []models.AuthorSyncSkippedBook
 	skippedMinPagesSample    []models.AuthorSyncSkippedBook
 	skippedMissingISBNSample []models.AuthorSyncSkippedBook
+	skippedThinClusterSample []models.AuthorSyncSkippedBook
 }
 
 // addSample appends b (with obs's Reason attached) to *sample, capped at
@@ -86,6 +91,17 @@ var signalCounter = map[string]func(*authorSyncCounters, models.Book, models.Fil
 	"catalog.belowMinPages": func(c *authorSyncCounters, b models.Book, o models.FilterObservation) {
 		c.skippedMinPages++
 		addSample(&c.skippedMinPagesSample, b, o)
+	},
+	// cluster.editionCountSupport is #2235 Phase 2's ClusterEditionCountSignal
+	// (internal/metadata/filterengine/signals_cluster.go). Only its
+	// exclude-direction observation ever reaches recordExcluded — the
+	// keep-direction observation, by construction, never bands a candidate
+	// EXCLUDE. Never fires at all unless a profile's ClusterFilterPreset is
+	// non-"off" (filterengine.ClusterSignalForPreset returns nil otherwise,
+	// and authors.go never appends a nil signal).
+	"cluster.editionCountSupport": func(c *authorSyncCounters, b models.Book, o models.FilterObservation) {
+		c.skippedThinCluster++
+		addSample(&c.skippedThinClusterSample, b, o)
 	},
 }
 
