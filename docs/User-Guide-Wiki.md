@@ -400,6 +400,17 @@ title ending in "Omnibus", slash-separated titles like "Title A / Title B",
 and "Books 1-3". Neither filter touches "Trilogy". A bundle already in your
 library is left alone; it just stops being offered back by the catalogue.
 
+**Cluster-based noise filtering** in the metadata profile (Off by default)
+cross-checks each candidate work against how well-attested it is across every
+provider record sharing its title — a real, catalogued book tends to have
+several editions on record; noise (misattributions, thin duplicate entries)
+tends to have few or none. It can rescue a work another filter above would
+otherwise drop (a part-book match on a well-attested title, for example) and
+can independently drop a thin-catalogue work no other filter caught. Three
+tiers — Conservative, Balanced (recommended), Aggressive — trade off how much
+it rescues; none of them expose raw scoring numbers. Off changes nothing
+about your current results.
+
 A **metadata refresh** re-syncs an author's metadata from the provider:
 covers, descriptions, ratings, genres and series links on the books you
 already have. It only *adds* newly-discovered works for an author you monitor
