@@ -12,7 +12,7 @@
 -- Every existing profile gets 'off': ClusterEditionCountSignal is never
 -- constructed, exclude_threshold is left at 0, and sync behavior is
 -- byte-identical to before this column existed. See
--- TestAuthorSyncParity_ClusterFilterOffMatchesPreThresholds.
+-- TestFetchAuthorBooks_ClusterFilterOffMatchesPreExistingBehavior.
 ALTER TABLE metadata_profiles ADD COLUMN cluster_filter_preset TEXT NOT NULL DEFAULT 'off';
 
 -- +migrate Down
