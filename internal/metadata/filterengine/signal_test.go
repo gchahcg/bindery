@@ -119,6 +119,29 @@ func TestMustRegistry_PanicsOnDuplicate(t *testing.T) {
 	MustRegistry(NewLanguageSignal(), NewLanguageSignal())
 }
 
+// TestRegistry_Decide pins that Registry.Decide is exactly the batched-pass
+// equivalent its doc claims: running every registered signal against a
+// candidate produces the identical Result the package-level Decide would,
+// given the same signal list.
+func TestRegistry_Decide(t *testing.T) {
+	r := MustRegistry(NewLanguageSignal())
+	c := Candidate{Book: &models.Book{Language: "fre"}}
+	ctx := &Context{AllowedLanguages: []string{"eng"}}
+
+	got := r.Decide(c, ctx)
+	want := Decide(c, ctx, NewLanguageSignal())
+
+	if got.Band != want.Band {
+		t.Errorf("Registry.Decide Band = %v, want %v", got.Band, want.Band)
+	}
+	if got.Band != BandExclude {
+		t.Fatalf("Registry.Decide Band = %v, want BandExclude for a disallowed language", got.Band)
+	}
+	if len(got.Observations) != 1 || got.Observations[0].Signal != "language.notAllowed" {
+		t.Errorf("Registry.Decide Observations = %+v, want one language.notAllowed observation", got.Observations)
+	}
+}
+
 func TestDefaultRegistry_MatchesDefaultSignalsOrder(t *testing.T) {
 	r := DefaultRegistry()
 	signals := r.Signals()

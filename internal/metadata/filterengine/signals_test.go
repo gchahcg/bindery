@@ -96,6 +96,9 @@ func TestLanguageSignal(t *testing.T) {
 			t.Errorf("%s: fires=%v, want %v", tt.name, got, tt.wantHit)
 		}
 	}
+	if got := fires(t, s, Candidate{Book: nil}, &Context{AllowedLanguages: []string{"eng"}}); got {
+		t.Error("nil Book should never fire")
+	}
 }
 
 func TestPartBookSignal(t *testing.T) {
@@ -189,6 +192,10 @@ func TestProviderNoiseSignal(t *testing.T) {
 	}
 	if got := fires(t, s, Candidate{Book: unrelated}, ctx); got {
 		t.Error("an unrelated observation on the book must not make this signal fire")
+	}
+
+	if got := fires(t, s, Candidate{Book: nil}, ctx); got {
+		t.Error("nil Book should never fire")
 	}
 }
 
