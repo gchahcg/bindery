@@ -228,6 +228,109 @@ func TestAuthorSyncParity_ProviderNoiseDoesNotStealMonitorLatestSlot(t *testing.
 	}
 }
 
+// TestAuthorSyncParity_MultiSignalCandidateCountsOnceAttributedToStrongest is
+// the golden proof the #2235 accumulation rework exists for: a candidate
+// that trips more than one signal must still be counted exactly once (never
+// double-counted across two Skipped* buckets, which would break
+// AccountedFor/Unaccounted reconciliation), attributed to the strongest
+// observation in its ledger — which at v1's equal veto magnitude means the
+// one earliest in registry order (registry_default.go: media type, junk
+// title, provider noise, language, part book, missing date, missing ISBN,
+// min pages).
+//
+// Before this rework, each of fetchAuthorBooks's Decide calls banded and
+// `continue`d independently, so a candidate tripping two filters was
+// attributed to whichever call site the loop happened to reach first — which
+// for these fixtures is the SAME registry-order-earliest signal, meaning a
+// black-box counter check alone cannot distinguish the old (first-checked-
+// wins) implementation from the new (accumulate-then-attribute-strongest)
+// one. That distinction is proven white-box, directly on the accumulated
+// Result, by TestEvaluateCandidate_AccumulatesEveryFiringSignal
+// (authors_filterengine_test.go). This test's job is different: proving the
+// full HTTP-level sync loop still reconciles correctly with two independent
+// multi-trip fixtures in play, one in each evaluation pass (free signals;
+// structural signals).
+func TestAuthorSyncParity_MultiSignalCandidateCountsOnceAttributedToStrongest(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	authorRepo := db.NewAuthorRepo(database)
+	bookRepo := db.NewBookRepo(database)
+	profileRepo := db.NewMetadataProfileRepo(database)
+
+	profile := &models.MetadataProfile{
+		Name: "Multi-trip", AllowedLanguages: "eng",
+		SkipPartBooks: true, SkipMissingDate: true,
+	}
+	if err := profileRepo.Create(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	author := &models.Author{
+		ForeignID: "OL-multitrip", Name: "Prolix Author", SortName: "Author, Prolix",
+		MetadataProvider: "openlibrary", MetadataProfileID: &profile.ID,
+	}
+	if err := authorRepo.Create(ctx, author); err != nil {
+		t.Fatal(err)
+	}
+
+	released := time.Date(2020, 3, 1, 0, 0, 0, 0, time.UTC)
+	works := []models.Book{
+		// Trips junk.titleEmptyOrAuthorName AND language.notAllowed (free
+		// pass, evaluated together in one Decide call): title equals the
+		// author's own name, language is French. Registry order puts junk
+		// before language, so this must land in SkippedJunk, not
+		// SkippedLanguage.
+		{ForeignID: "OL-junk-and-lang", Title: "Prolix Author", SortTitle: "Prolix Author", Language: "fre",
+			ReleaseDate: &released, Status: models.BookStatusWanted, MetadataProvider: "openlibrary", Genres: []string{}},
+		// Trips structure.partBookTitle AND catalog.missingReleaseDate
+		// (structural pass, evaluated together in the same Decide call):
+		// box-set title with no release date. Registry order puts part-book
+		// before missing-date, so this must land in SkippedPartBooks, not
+		// SkippedMissingDate.
+		{ForeignID: "OL-part-and-nodate", Title: "The Saga: Books 1-3", SortTitle: "The Saga: Books 1-3", Language: "eng",
+			ReleaseDate: nil, Status: models.BookStatusWanted, MetadataProvider: "openlibrary", Genres: []string{}},
+		// Clean control: trips nothing, must be added.
+		{ForeignID: "OL-clean", Title: "A Perfectly Ordinary Book", SortTitle: "A Perfectly Ordinary Book", Language: "eng",
+			ReleaseDate: &released, Status: models.BookStatusWanted, MetadataProvider: "openlibrary", Genres: []string{}},
+	}
+
+	provider := &stubMetaProvider{works: works}
+	h := NewAuthorHandler(authorRepo, nil, bookRepo, nil, metadata.NewAggregator(provider), nil, profileRepo, nil)
+	h.FetchAuthorBooks(author, false, "")
+
+	sync := h.syncSummaries.get(author.ID)
+	if sync == nil {
+		t.Fatal("no summary recorded for the sync")
+	}
+
+	if sync.Added != 1 {
+		t.Errorf("Added = %d, want 1 (only the clean control)", sync.Added)
+	}
+	if sync.SkippedJunk != 1 {
+		t.Errorf("SkippedJunk = %d, want 1 (the junk+language candidate, attributed to the registry-earlier signal)", sync.SkippedJunk)
+	}
+	if sync.SkippedLanguage != 0 {
+		t.Errorf("SkippedLanguage = %d, want 0: the junk+language candidate must be counted once, under junk, not twice", sync.SkippedLanguage)
+	}
+	if sync.SkippedPartBooks != 1 {
+		t.Errorf("SkippedPartBooks = %d, want 1 (the part-book+missing-date candidate, attributed to the registry-earlier signal)", sync.SkippedPartBooks)
+	}
+	if sync.SkippedMissingDate != 0 {
+		t.Errorf("SkippedMissingDate = %d, want 0: the part-book+missing-date candidate must be counted once, under part-books, not twice", sync.SkippedMissingDate)
+	}
+	if sync.Total != len(works) {
+		t.Errorf("Total = %d, want %d", sync.Total, len(works))
+	}
+	if sync.Unaccounted() != 0 {
+		t.Errorf("Unaccounted() = %d, want 0 — every work must leave the sync through exactly one counted path even when it trips multiple signals",
+			sync.Unaccounted())
+	}
+}
+
 // TestApplyAuthorMajorityLanguageFallback_IgnoresProviderNoise pins the
 // second collective-inference stage the same #2235 change leaked into. The
 // majority-language vote also runs over the raw provider slice, so a run of

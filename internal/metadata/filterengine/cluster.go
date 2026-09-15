@@ -1,22 +1,12 @@
 package filterengine
 
 import (
-	"regexp"
 	"sort"
 
 	"github.com/vavallee/bindery/internal/indexer"
+	"github.com/vavallee/bindery/internal/metadata"
 	"github.com/vavallee/bindery/internal/models"
 )
-
-// leadingArticleRe strips a leading "The"/"A"/"An" for clustering purposes
-// only. Deliberately the same regex as
-// internal/metadata/aggregator_author_works.go's leadingArticleRe (and
-// internal/metadata/bundle_titles.go's copy of it) — not re-exported from
-// there and duplicated here on purpose: a cluster key is an in-memory,
-// per-run grouping (see ClusterKey's doc), and importing it from a package
-// whose regex could someday need to serve a different, identity-scoped
-// purpose would couple two concepts that only look alike today.
-var leadingArticleRe = regexp.MustCompile(`(?i)^(?:the|an?)\s+`)
 
 // ClusterKey is the in-memory grouping key clustering uses to decide "these
 // records are the same work seen through different providers/entries" for
@@ -31,12 +21,14 @@ var leadingArticleRe = regexp.MustCompile(`(?i)^(?:the|an?)\s+`)
 //
 // This key builds on CanonicalDedupKey (so there remains exactly one title
 // normalizer, not two forks of it — see #2032's own restraint on this point)
-// and additionally folds a leading article, matching
-// aggregator_author_works.go's articleInsensitiveTitleKey composition, which
-// already has production mileage in pruneAuthorWorkRedundantTitles. Never
-// persisted; recomputed fresh every sync.
+// and additionally folds a leading article via metadata.StripLeadingArticle,
+// the same regex aggregator_author_works.go's articleInsensitiveTitleKey
+// composition uses (which already has production mileage in
+// pruneAuthorWorkRedundantTitles) — exactly one normalizer implementation,
+// not a second copy of the pattern (#2235 rework). Never persisted;
+// recomputed fresh every sync.
 func ClusterKey(title string) string {
-	return leadingArticleRe.ReplaceAllString(indexer.CanonicalDedupKey(title), "")
+	return metadata.StripLeadingArticle(indexer.CanonicalDedupKey(title))
 }
 
 // Cluster is one group of candidates sharing a ClusterKey within one author
