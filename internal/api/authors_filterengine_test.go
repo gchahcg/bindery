@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/vavallee/bindery/internal/metadata/filterengine"
@@ -118,4 +119,61 @@ func TestRecordExcluded_AttributesStrongestObservation(t *testing.T) {
 	if c.skippedLang != 0 {
 		t.Errorf("skippedLang = %d, want 0: only the strongest observation's counter should increment", c.skippedLang)
 	}
+}
+
+// TestStrongestObservation_LaterStrictlyLargerMagnitudeWins pins the branch
+// TestRecordExcluded_AttributesStrongestObservation's tie case doesn't reach:
+// strongestObservation's doc says a genuinely larger magnitude wins outright,
+// no tie involved. Every v1 signal fires at the same veto magnitude, so this
+// can't happen through the real registry today — it's exercised directly
+// here as a pure function test of strongestObservation's own comparison
+// logic, ready for the day a graded signal's magnitude actually varies.
+func TestStrongestObservation_LaterStrictlyLargerMagnitudeWins(t *testing.T) {
+	obs := []models.FilterObservation{
+		{Signal: "junk.titleEmptyOrAuthorName", Weight: -1000, Confidence: 1},
+		{Signal: "language.notAllowed", Weight: -1000, Confidence: 0.5},
+		{Signal: "structure.partBookTitle", Weight: -2000, Confidence: 1},
+	}
+	got, ok := strongestObservation(obs)
+	if !ok {
+		t.Fatal("strongestObservation returned ok=false for a non-empty slice")
+	}
+	if got.Signal != "structure.partBookTitle" {
+		t.Errorf("strongestObservation = %q, want structure.partBookTitle (the only -2000 magnitude, strictly larger than either -1000)", got.Signal)
+	}
+}
+
+// TestStrongestObservation_Empty pins the len(obs)==0 short-circuit — no
+// candidate's ledger is ever actually empty when recordExcluded is called
+// (Decide only calls it when result.Band == BandExclude, which requires at
+// least one observation), but the function is exported to this package and
+// its own doc promises ok=false for that input.
+func TestStrongestObservation_Empty(t *testing.T) {
+	_, ok := strongestObservation(nil)
+	if ok {
+		t.Error("strongestObservation(nil) ok = true, want false")
+	}
+}
+
+// TestRecordExcluded_PanicsOnUnmappedSignal pins the guard
+// TestEverySignalHasACounter exists to make unreachable in practice: an
+// observation whose Signal has no signalCounter entry is a programming
+// error (a registry signal shipped without wiring its counter), and
+// recordExcluded's own doc says it panics rather than silently dropping the
+// count — reaching this is meant to be loud, not a quiet miscount.
+func TestRecordExcluded_PanicsOnUnmappedSignal(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("recordExcluded did not panic for an unmapped signal ID")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "nonsense.unmappedSignal") {
+			t.Errorf("panic value = %v, want a string mentioning the unmapped signal ID", r)
+		}
+	}()
+	c := &authorSyncCounters{}
+	recordExcluded(c, models.Book{Title: "X"}, []models.FilterObservation{
+		{Signal: "nonsense.unmappedSignal", Weight: -1000, Confidence: 1},
+	})
 }
