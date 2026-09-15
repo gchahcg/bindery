@@ -30,9 +30,21 @@ type MetadataProfile struct {
 	// candidate as EXCLUDE, since a clean candidate's score is always
 	// exactly 0. See validateScoreThresholds's doc for the full reasoning —
 	// this was a real bug in an earlier, looser version of that check.
-	KeepThreshold    float64   `json:"keepThreshold"`
-	ExcludeThreshold float64   `json:"excludeThreshold"`
-	CreatedAt        time.Time `json:"createdAt"`
+	KeepThreshold    float64 `json:"keepThreshold"`
+	ExcludeThreshold float64 `json:"excludeThreshold"`
+	// ClusterFilterPreset selects #2235 Phase 2's ClusterEditionCountSignal
+	// tuning (migration 087) — a closed set of server-owned presets
+	// (internal/metadata/filterengine.ClusterFilterPreset), never raw
+	// threshold numbers. "off" (the default for every existing profile) is
+	// byte-identical to this field not existing at all: no cluster signal is
+	// constructed, and the KeepThreshold/ExcludeThreshold columns above stay
+	// exactly the locked 0/0 pair validateScoreThresholds enforces. A non-off
+	// preset supplies its own shared threshold at the fetchAuthorBooks call
+	// site instead of reading it from those two columns — see
+	// filterengine.ThresholdForPreset's doc for why it has to be one shared
+	// value, not an independent exclude-side move.
+	ClusterFilterPreset string    `json:"clusterFilterPreset"`
+	CreatedAt           time.Time `json:"createdAt"`
 	// OwnerUserID is the per-user ownership column added in migration 025.
 	// Zero means "no recorded owner" (legacy pre-backfill rows); auth's
 	// CheckOwnership treats that as visible to every authenticated caller.
