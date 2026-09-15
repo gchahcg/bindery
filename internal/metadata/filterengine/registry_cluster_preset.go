@@ -55,16 +55,23 @@ const (
 	// wants this signal on at all.
 	ClusterFilterBalanced ClusterFilterPreset = "balanced"
 
-	// ClusterFilterAggressive widens both the keep gate (MaxEditionCount>=2,
-	// versus >=3) and the exclude band (MaxEditionCount<=1, versus <=0), at
-	// higher weights (500/-1000) and a looser shared threshold (-1000),
-	// trading essentially no measured precision for a further recall gain
-	// on the same 19-author isolation: recall=92.4%, precision=83.7% — the
-	// three tiers hold precision nearly flat on this dataset and differ
-	// mainly in how much additional recall each one rescues, not in a
-	// precision/recall trade a user is choosing to accept; document it that
-	// way rather than the more familiar (but here inaccurate) "aggressive
-	// trades precision for recall" framing.
+	// ClusterFilterAggressive widens both the keep gate (MaxEditionCount>=1,
+	// versus >=3) and the exclude band (MaxEditionCount<=1, versus <=0), at a
+	// higher keep weight (700) and a looser shared threshold (-950 — NOT
+	// -1000: -1000 exactly equals vetoWeight, and BandFor's strict "<" bands
+	// a lone veto's score of -1000 as KEEP rather than EXCLUDE at that exact
+	// value, silently defanging every v1 signal for the whole profile. An
+	// independent review pass caught this after an earlier version of this
+	// preset shipped -1000 and its "recall=92.4%" citation turned out to be
+	// measuring that defanged behavior, not real rescuing — re-measured
+	// after the fix at -950, a value with headroom on both sides of the
+	// coincidence). Trades essentially no measured precision for a further
+	// recall gain on the same 19-author isolation: recall=97.0%,
+	// precision=83.8% — the three tiers hold precision nearly flat on this
+	// dataset and differ mainly in how much additional recall each one
+	// rescues, not in a precision/recall trade a user is choosing to
+	// accept; document it that way rather than the more familiar (but here
+	// inaccurate) "aggressive trades precision for recall" framing.
 	ClusterFilterAggressive ClusterFilterPreset = "aggressive"
 )
 
@@ -82,7 +89,7 @@ type clusterPresetTuning struct {
 var clusterPresetTunings = map[ClusterFilterPreset]clusterPresetTuning{
 	ClusterFilterConservative: {threshold: -500, keepWeight: 200, excludeWeight: -600, keepMinEditionCount: 3, excludeMaxEditionCount: 0},
 	ClusterFilterBalanced:     {threshold: -750, keepWeight: 300, excludeWeight: -1000, keepMinEditionCount: 3, excludeMaxEditionCount: 0},
-	ClusterFilterAggressive:   {threshold: -1000, keepWeight: 500, excludeWeight: -1000, keepMinEditionCount: 2, excludeMaxEditionCount: 1},
+	ClusterFilterAggressive:   {threshold: -950, keepWeight: 700, excludeWeight: -1000, keepMinEditionCount: 1, excludeMaxEditionCount: 1},
 }
 
 // ValidClusterFilterPreset reports whether p is a preset this package knows
