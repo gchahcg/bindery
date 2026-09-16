@@ -177,3 +177,25 @@ func TestRecordExcluded_PanicsOnUnmappedSignal(t *testing.T) {
 		{Signal: "nonsense.unmappedSignal", Weight: -1000, Confidence: 1},
 	})
 }
+
+// TestRecordExcluded_AttributesClusterEditionCount is the #2235 Phase 2 twin
+// of TestRecordExcluded_AttributesStrongestObservation: it pins the counter
+// wiring for the one graded, bidirectional signal that is deliberately NOT in
+// filterengine.DefaultSignals() — ClusterEditionCountSignal, constructed per
+// profile from ClusterFilterPreset and appended by filterEngineSignals when a
+// profile opts into a non-"off" preset. A thin cluster banded EXCLUDE by that
+// signal must land in skippedThinCluster, not be silently dropped.
+func TestRecordExcluded_AttributesClusterEditionCount(t *testing.T) {
+	c := &authorSyncCounters{}
+	obs := []models.FilterObservation{
+		{Signal: "cluster.editionCountSupport", Weight: -1000, Confidence: 1, Reason: "cluster has max edition_count=0, thin-catalogue noise"},
+	}
+	recordExcluded(c, models.Book{Title: "Thin Work"}, obs)
+
+	if c.skippedThinCluster != 1 {
+		t.Errorf("skippedThinCluster = %d, want 1", c.skippedThinCluster)
+	}
+	if len(c.skippedThinClusterSample) != 1 {
+		t.Errorf("skippedThinClusterSample len = %d, want 1", len(c.skippedThinClusterSample))
+	}
+}

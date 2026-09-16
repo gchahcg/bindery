@@ -180,3 +180,86 @@ func TestMetadataProfileRepo_ScoreThresholds(t *testing.T) {
 		t.Errorf("thresholds after Update = keep=%v exclude=%v, want 0/0", got.KeepThreshold, got.ExcludeThreshold)
 	}
 }
+
+// TestMetadataProfileRepo_ClusterPresetRoundTrip is the #2235 Phase 2 guard
+// for the cluster_filter_preset column (migration 087): a user-owned profile
+// created with a measured preset must persist it through CreateForUser and
+// round-trip it through GetByID, and an Update must be able to change the
+// preset and have the new value read back.
+func TestMetadataProfileRepo_ClusterPresetRoundTrip(t *testing.T) {
+	database, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	repo := NewMetadataProfileRepo(database)
+
+	owner, err := NewUserRepo(database).Create(ctx, "alice", "h1")
+	if err != nil {
+		t.Fatalf("create owner user: %v", err)
+	}
+	p := &models.MetadataProfile{Name: "Clustered", AllowedLanguages: "eng", ClusterFilterPreset: "aggressive"}
+	if err := repo.CreateForUser(ctx, p, owner.ID); err != nil {
+		t.Fatalf("CreateForUser: %v", err)
+	}
+	if p.OwnerUserID != owner.ID {
+		t.Errorf("OwnerUserID = %d, want %d", p.OwnerUserID, owner.ID)
+	}
+	got, err := repo.GetByID(ctx, p.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetByID: %v (got %+v)", err, got)
+	}
+	if got.ClusterFilterPreset != "aggressive" {
+		t.Errorf("ClusterFilterPreset after create = %q, want aggressive", got.ClusterFilterPreset)
+	}
+
+	got.ClusterFilterPreset = "conservative"
+	if err := repo.Update(ctx, got); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	again, err := repo.GetByID(ctx, p.ID)
+	if err != nil || again == nil {
+		t.Fatalf("GetByID after update: %v", err)
+	}
+	if again.ClusterFilterPreset != "conservative" {
+		t.Errorf("ClusterFilterPreset after update = %q, want conservative", again.ClusterFilterPreset)
+	}
+}
+
+// TestMetadataProfileRepo_UpdateDefaultsClusterPresetToOff pins the Update
+// path's empty-field defaults: a row updated with an empty ClusterFilterPreset
+// is stored as "off" (never an empty string), and an empty
+// UnknownLanguageBehavior is stored as UnknownLanguagePass.
+func TestMetadataProfileRepo_UpdateDefaultsClusterPresetToOff(t *testing.T) {
+	database, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	repo := NewMetadataProfileRepo(database)
+
+	p := &models.MetadataProfile{Name: "Clustered", AllowedLanguages: "eng", ClusterFilterPreset: "aggressive"}
+	if err := repo.Create(ctx, p); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	upd := &models.MetadataProfile{ID: p.ID, Name: "Clustered", AllowedLanguages: "eng"}
+	if err := repo.Update(ctx, upd); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if upd.ClusterFilterPreset != "off" {
+		t.Errorf("ClusterFilterPreset defaulted to %q, want off", upd.ClusterFilterPreset)
+	}
+	if upd.UnknownLanguageBehavior != models.UnknownLanguagePass {
+		t.Errorf("UnknownLanguageBehavior defaulted to %q, want %q", upd.UnknownLanguageBehavior, models.UnknownLanguagePass)
+	}
+	got, err := repo.GetByID(ctx, p.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.ClusterFilterPreset != "off" {
+		t.Errorf("stored ClusterFilterPreset = %q, want off", got.ClusterFilterPreset)
+	}
+}

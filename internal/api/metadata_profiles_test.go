@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/vavallee/bindery/internal/db"
@@ -196,5 +197,80 @@ func TestMetaProfileDelete_Success(t *testing.T) {
 	h.Delete(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("expected 204, got %d", rec.Code)
+	}
+}
+
+// TestMetaProfileCreate_RejectsInvalidClusterFilterPreset is the #2235 Phase 2
+// regression guard for validateClusterFilterPreset: a client can only pick a
+// preset from the closed set (off/conservative/balanced/aggressive), never an
+// arbitrary keep/exclude pair. An unknown value is rejected on create.
+func TestMetaProfileCreate_RejectsInvalidClusterFilterPreset(t *testing.T) {
+	h, _, _ := metaProfileFixture(t)
+	body := bytes.NewBufferString(`{"name":"Cluster","clusterFilterPreset":"bogus"}`)
+	rec := httptest.NewRecorder()
+	h.Create(rec, httptest.NewRequest(http.MethodPost, "/api/v1/metadata-profile", body))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an unknown clusterFilterPreset, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "clusterFilterPreset") {
+		t.Errorf("expected the error to name clusterFilterPreset, got %s", rec.Body.String())
+	}
+}
+
+// TestMetaProfileUpdate_RejectsInvalidClusterFilterPreset is the update-path
+// twin of the create guard above: the closed-set check runs on update too, so
+// an existing profile cannot be flipped to an unmeasured preset.
+func TestMetaProfileUpdate_RejectsInvalidClusterFilterPreset(t *testing.T) {
+	h, repo, ctx := metaProfileFixture(t)
+	p := &models.MetadataProfile{Name: "Original", AllowedLanguages: "eng"}
+	if err := repo.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.NewBufferString(`{"name":"Original","clusterFilterPreset":"bogus"}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/metadata-profile/"+strconv.FormatInt(p.ID, 10), body)
+	req = withURLParam(req, "id", strconv.FormatInt(p.ID, 10))
+	h.Update(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for an unknown clusterFilterPreset on update, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMetaProfileCreate_AcceptsValidClusterFilterPreset confirms a measured
+// preset is accepted and persisted verbatim.
+func TestMetaProfileCreate_AcceptsValidClusterFilterPreset(t *testing.T) {
+	h, _, _ := metaProfileFixture(t)
+	body := bytes.NewBufferString(`{"name":"Cluster","clusterFilterPreset":"balanced"}`)
+	rec := httptest.NewRecorder()
+	h.Create(rec, httptest.NewRequest(http.MethodPost, "/api/v1/metadata-profile", body))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got models.MetadataProfile
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ClusterFilterPreset != "balanced" {
+		t.Errorf("expected clusterFilterPreset=balanced, got %q", got.ClusterFilterPreset)
+	}
+}
+
+// TestMetaProfileCreate_DefaultsClusterFilterPresetToOff pins the create-path
+// default: omitting the field stores "off" (the signal disabled), matching the
+// pre-Phase-2 behaviour for every existing profile.
+func TestMetaProfileCreate_DefaultsClusterFilterPresetToOff(t *testing.T) {
+	h, _, _ := metaProfileFixture(t)
+	body := bytes.NewBufferString(`{"name":"Default"}`)
+	rec := httptest.NewRecorder()
+	h.Create(rec, httptest.NewRequest(http.MethodPost, "/api/v1/metadata-profile", body))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got models.MetadataProfile
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ClusterFilterPreset != "off" {
+		t.Errorf("expected default clusterFilterPreset=off, got %q", got.ClusterFilterPreset)
 	}
 }
