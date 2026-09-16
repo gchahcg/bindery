@@ -1203,6 +1203,52 @@ func TestGetAuthorWorksForRefresh_HTTP_IntactOnlyWhenNoCallFailed(t *testing.T) 
 	})
 }
 
+// TestGetAuthorWorksSnapshot_CoverAndRatingsMerge covers three branches the
+// snapshot test matrix missed: a primary works entry that carries a cover
+// (ImageURL is built from the works endpoint's covers array, client.go:455),
+// a primary entry with an empty title (skipped, client.go:417), and a
+// search-enrichment doc whose ratings merge onto the matching primary work
+// (client.go:470).
+func TestGetAuthorWorksSnapshot_CoverAndRatingsMerge(t *testing.T) {
+	worksResp := authorWorksResponse{
+		Size: 2,
+		Entries: []authorWorkEntry{
+			{Key: "/works/OL1W", Title: "Cover Book", Covers: []int{12345}},
+			{Key: "/works/OL2W", Title: ""}, // empty title -> skipped
+		},
+	}
+	// searchAuthorWorks decodes ratings_count/ratings_average from the raw
+	// search JSON (its own inline struct), so a plain string body works here.
+	searchBody := `{"numFound":1,"docs":[{"key":"/works/OL1W","title":"Cover Book","ratings_count":42,"ratings_average":4.5}]}`
+	c := newClientWithPaths(t, map[string]interface{}{
+		"/authors/OL1A/works.json": jsonStr(worksResp),
+		"/search.json":             searchBody,
+	})
+
+	books, _, err := c.GetAuthorWorksSnapshot(context.Background(), "OL1A")
+	if err != nil {
+		t.Fatalf("GetAuthorWorksSnapshot: %v", err)
+	}
+	if len(books) != 1 {
+		t.Fatalf("expected 1 book (empty-title entry skipped), got %d: %+v", len(books), books)
+	}
+	b := books[0]
+	if b.Title != "Cover Book" {
+		t.Errorf("title: want 'Cover Book', got %q", b.Title)
+	}
+	// Primary works entry carried a cover -> ImageURL built from it.
+	if !strings.Contains(b.ImageURL, "/b/id/12345-L.jpg") {
+		t.Errorf("ImageURL from primary cover: want /b/id/12345-L.jpg, got %q", b.ImageURL)
+	}
+	// Search enrichment carried ratings -> merged onto the primary work.
+	if b.RatingsCount != 42 {
+		t.Errorf("RatingsCount: want 42, got %d", b.RatingsCount)
+	}
+	if b.AverageRating != 4.5 {
+		t.Errorf("AverageRating: want 4.5, got %v", b.AverageRating)
+	}
+}
+
 // Works present only in the search index (when /authors/{id}/works is empty)
 // are still returned as a fallback — the search enrichment source stands on
 // its own when the works endpoint returns nothing.
