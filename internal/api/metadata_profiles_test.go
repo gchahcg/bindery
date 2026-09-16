@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vavallee/bindery/internal/auth"
 	"github.com/vavallee/bindery/internal/db"
 	"github.com/vavallee/bindery/internal/models"
 )
@@ -272,5 +273,92 @@ func TestMetaProfileCreate_DefaultsClusterFilterPresetToOff(t *testing.T) {
 	}
 	if got.ClusterFilterPreset != "off" {
 		t.Errorf("expected default clusterFilterPreset=off, got %q", got.ClusterFilterPreset)
+	}
+}
+
+// TestMetaProfileUpdate_NonOwnerForbidden is the #2235 Phase 2 IDOR guard
+// regression for the Update path (the Get and Delete twins are already
+// covered): with the tenancy gate on, a second user must get a 404 — not a
+// 200/400/500 that would leak the row's existence — when updating a profile
+// owned by someone else.
+func TestMetaProfileUpdate_NonOwnerForbidden(t *testing.T) {
+	auth.SetEnforceTenancyForTests(t, true)
+	database, err := db.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	ctx := context.Background()
+	repo := db.NewMetadataProfileRepo(database)
+	users := db.NewUserRepo(database)
+	u1, err := users.Create(ctx, "alice", "h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := users.Create(ctx, "bob", "h2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &models.MetadataProfile{Name: "Alice's", AllowedLanguages: "eng"}
+	if err := repo.CreateForUser(ctx, p, u1.ID); err != nil {
+		t.Fatal(err)
+	}
+	h := NewMetadataProfileHandler(repo)
+	req := newRequestForID(http.MethodPut, "/api/v1/metadata-profile/"+strconv.FormatInt(p.ID, 10), p.ID, withAuthCtx(context.Background(), u2.ID, "user"))
+	rec := httptest.NewRecorder()
+	h.Update(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("cross-user Update must 404 with gate on; got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMetaProfileGet_InvalidID, TestMetaProfileUpdate_InvalidID, and
+// TestMetaProfileDelete_InvalidID pin the id-parsing guard on all three
+// by-id routes: a non-numeric {id} is a client error (400), not a 404 that
+// would conflate "bad input" with "no such row".
+func TestMetaProfileGet_InvalidID(t *testing.T) {
+	h, _, _ := metaProfileFixture(t)
+	req := withURLParam(httptest.NewRequest(http.MethodGet, "/api/v1/metadata-profile/abc", nil), "id", "abc")
+	rec := httptest.NewRecorder()
+	h.Get(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for a non-numeric id on Get, got %d", rec.Code)
+	}
+}
+
+func TestMetaProfileUpdate_InvalidID(t *testing.T) {
+	h, _, _ := metaProfileFixture(t)
+	req := withURLParam(httptest.NewRequest(http.MethodPut, "/api/v1/metadata-profile/abc", bytes.NewBufferString(`{"name":"X"}`)), "id", "abc")
+	rec := httptest.NewRecorder()
+	h.Update(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for a non-numeric id on Update, got %d", rec.Code)
+	}
+}
+
+func TestMetaProfileDelete_InvalidID(t *testing.T) {
+	h, _, _ := metaProfileFixture(t)
+	req := withURLParam(httptest.NewRequest(http.MethodDelete, "/api/v1/metadata-profile/abc", nil), "id", "abc")
+	rec := httptest.NewRecorder()
+	h.Delete(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for a non-numeric id on Delete, got %d", rec.Code)
+	}
+}
+
+// TestMetaProfileUpdate_BadBody pins the decode-error guard on Update: an
+// unparseable body is a 400, reached only after the id and ownership checks
+// pass (so an unowned row with a malformed body still surfaces the 400).
+func TestMetaProfileUpdate_BadBody(t *testing.T) {
+	h, repo, ctx := metaProfileFixture(t)
+	p := &models.MetadataProfile{Name: "X", AllowedLanguages: "eng"}
+	if err := repo.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	req := withURLParam(httptest.NewRequest(http.MethodPut, "/api/v1/metadata-profile/"+strconv.FormatInt(p.ID, 10), bytes.NewBufferString("not-json")), "id", strconv.FormatInt(p.ID, 10))
+	rec := httptest.NewRecorder()
+	h.Update(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for a malformed Update body, got %d", rec.Code)
 	}
 }

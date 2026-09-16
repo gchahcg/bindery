@@ -199,3 +199,17 @@ func TestRecordExcluded_AttributesClusterEditionCount(t *testing.T) {
 		t.Errorf("skippedThinClusterSample len = %d, want 1", len(c.skippedThinClusterSample))
 	}
 }
+
+// TestAddSample_ClusterCap pins addSample's bound for the cluster signal's
+// sample list: once it reaches authorSyncSkippedSampleLimit it must stop
+// growing, so a prolific author's rejected thin-cluster tail can't bloat the
+// sync payload.
+func TestAddSample_ClusterCap(t *testing.T) {
+	var sample []models.AuthorSyncSkippedBook
+	for i := 0; i < authorSyncSkippedSampleLimit+3; i++ {
+		addSample(&sample, models.Book{Title: "Thin Work"}, models.FilterObservation{Signal: "cluster.editionCountSupport", Reason: "thin cluster"})
+	}
+	if len(sample) != authorSyncSkippedSampleLimit {
+		t.Errorf("sample len = %d, want the cap %d", len(sample), authorSyncSkippedSampleLimit)
+	}
+}
