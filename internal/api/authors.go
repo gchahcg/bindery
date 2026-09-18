@@ -2066,6 +2066,23 @@ func (h *AuthorHandler) runCatalogueSync(ctx context.Context, author *models.Aut
 		}
 	}
 
+	// Series links for the books the library already has (#2328). Lazy: it
+	// reads nothing until the first existing book turns up carrying a series
+	// ref, so a sync that creates everything, or a provider with no series
+	// data, costs nothing.
+	//
+	// It is handed the ids of the author's books as they are right now,
+	// before this run creates or re-parents anything. That set is what makes
+	// its one author-scoped membership snapshot trustworthy: for a book
+	// outside it, "no row in the snapshot" means "the snapshot cannot see
+	// this book", not "this book is in no series", and it reads that book on
+	// its own instead.
+	preexistingBookIDs := make(map[int64]struct{}, len(allBooks))
+	for i := range allBooks {
+		preexistingBookIDs[allBooks[i].ID] = struct{}{}
+	}
+	seriesLinker := newExistingBookSeriesLinker(h.series, author.ID, preexistingBookIDs)
+
 	searchQueue := make([]models.Book, 0)
 	// createdBooks collects the books this sync creates so their edition
 	// hydration and on-disk check run as one batched pass afterwards rather
@@ -2398,6 +2415,13 @@ func (h *AuthorHandler) runCatalogueSync(ctx context.Context, author *models.Aut
 			// sync from either provider resolves it exactly rather than
 			// relying on a title comparison (#1705).
 			h.recordBookIdentities(ctx, existing, b.ForeignID, b.HardcoverForeignID)
+			// The other half of "a refresh may always UPDATE the books the
+			// library already has". This branch is the id-resolved match: the
+			// work carries an id some local row already holds, which on an
+			// imported library is every work. Before #2328 series membership
+			// was only ever written for books the sync CREATED, so the one
+			// repair nobody could perform was the series one.
+			seriesLinker.link(ctx, existing, b.SeriesRefs)
 			matched++
 			continue
 		}
@@ -2481,6 +2505,15 @@ func (h *AuthorHandler) runCatalogueSync(ctx context.Context, author *models.Aut
 			if hydrateExistingFromMatchedHardcover {
 				h.hydrateMatchedHardcoverEditions(ctx, existing, b.HardcoverForeignID, nil)
 			}
+			// Same treatment as the id-resolved branch, for the row this run
+			// recognised by title instead: a calibre stub just upgraded to a
+			// real provider id, a dual-format merge, or a same-format
+			// duplicate. All three end with one local row standing for this
+			// work, and the provider has just told us which series it is in
+			// (#2328). The title match is the branch an ABS or calibre import
+			// lands in most often, and those rows are precisely the ones that
+			// arrived with no series at all.
+			seriesLinker.link(ctx, existing, b.SeriesRefs)
 			// Same bucket as the id-resolved branch above. From the user's side
 			// there is no difference worth a separate number: the work is in
 			// their library, Bindery found it, and it did not need creating.
@@ -2530,6 +2563,12 @@ func (h *AuthorHandler) runCatalogueSync(ctx context.Context, author *models.Aut
 				}
 				// A losing race still ends with the book present, so this is a
 				// match and not a failure.
+				//
+				// No series link here, deliberately (#2328): the sync that won
+				// the race is about to run its own create path over this row,
+				// including handleNewWantedBook, and linking it from here
+				// would put two writers on one book's primary series. The row
+				// gets its links from that sync, or from the next refresh.
 				matched++
 				continue
 			}
@@ -2549,6 +2588,13 @@ func (h *AuthorHandler) runCatalogueSync(ctx context.Context, author *models.Aut
 			failed++
 			continue
 		}
+		// Claim this row for the create path (#2328). seenTitles above already
+		// holds it, so a later work with the same normalised title reaches the
+		// title branch with a book this run made; handleNewWantedBook links
+		// its series a few lines below, from the same refs, and two writers
+		// racing over which of them is the primary series is exactly the
+		// #2525 shape.
+		seriesLinker.markCreated(b.ID)
 		// Hydration and the on-disk check happen in the pass below, once the
 		// whole created set is known, so their provider calls can be made a
 		// few at a time instead of one per book in sequence (#1929).
@@ -2592,6 +2638,12 @@ func (h *AuthorHandler) runCatalogueSync(ctx context.Context, author *models.Aut
 			searchQueue = append(searchQueue, b)
 		}
 	}
+	// Now that every created book has its own series written, release the refs
+	// held back from them (#2328). Two provider works sharing a normalised
+	// title means the second one's series never reached the create path at
+	// all, because that pass iterates the created rows and not the works.
+	seriesLinker.linkDeferred(ctx)
+	seriesLinker.logSummary(author.Name)
 	// Every write is done and the announcement list is final, so the next
 	// sync of this author may start. Indexer searches and webhook delivery
 	// can take minutes and need no lock.
