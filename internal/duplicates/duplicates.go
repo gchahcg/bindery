@@ -67,10 +67,11 @@ const (
 	minResidualLen     = 6
 )
 
-// maxPairwiseBooks caps the O(n²) pairwise pass. An author catalogue beyond
-// this size skips the substring rule (the other three rules are bucket
-// comparisons and stay cheap); the endpoint remains correct, just less
-// aggressive, for the pathological case.
+// maxPairwiseBooks gates the substring rule. The pairwise loop always runs
+// its full O(n²) sweep, but every pair check is a cheap string comparison
+// except substring, which scans; above this catalogue size the scan is
+// skipped, so a pathological catalogue stays fast — correct, just less
+// aggressive.
 const maxPairwiseBooks = 2000
 
 // aggressiveFold reduces a title to the shared comparison alphabet — NFC,
@@ -295,9 +296,10 @@ func bookKeyFor(title string) bookKeys {
 // members count as active) belongs to the caller, which is the only layer
 // that can act on the result.
 //
-// Algorithm: keys are precomputed per book; every pair is evaluated (O(n²),
-// bounded by maxPairwiseBooks); pairs with at least one firing rule are
-// unioned; the connected components are the groups. Output is deterministic:
+// Algorithm: keys are precomputed per book; every pair is evaluated (full
+// O(n²) sweep, substring rule gated by maxPairwiseBooks); pairs with at
+// least one firing rule are unioned; the connected components are the
+// groups. Output is deterministic:
 // groups sorted by key, members by book ID.
 func Scan(books []models.Book) []Group {
 	n := len(books)
