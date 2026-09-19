@@ -23,7 +23,7 @@ export default function DuplicateCandidatesModal({ authorId, authorName, onClose
   const { t } = useTranslation()
   const [result, setResult] = useState<DuplicateCandidates | null>(null)
   const [loading, setLoading] = useState(true)
-  const [busyBook, setBusyBook] = useState<number | null>(null)
+  const [busyBooks, setBusyBooks] = useState<Set<number>>(() => new Set())
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(() => {
@@ -40,7 +40,7 @@ export default function DuplicateCandidatesModal({ authorId, authorName, onClose
   useEffect(() => { load() }, [load])
 
   const toggleExclusion = async (bookId: number) => {
-    setBusyBook(bookId)
+    setBusyBooks(prev => new Set(prev).add(bookId))
     setError(null)
     try {
       await api.toggleExcluded(bookId)
@@ -49,7 +49,11 @@ export default function DuplicateCandidatesModal({ authorId, authorName, onClose
     } catch (err) {
       setError(err instanceof Error ? err.message : t('duplicateCandidates.toggleFailed', 'Changing the exclusion failed'))
     } finally {
-      setBusyBook(null)
+      setBusyBooks(prev => {
+        const next = new Set(prev)
+        next.delete(bookId)
+        return next
+      })
     }
   }
 
@@ -129,7 +133,7 @@ export default function DuplicateCandidatesModal({ authorId, authorName, onClose
                         <button
                           type="button"
                           onClick={() => toggleExclusion(book.id)}
-                          disabled={busyBook === book.id}
+                          disabled={busyBooks.has(book.id)}
                           className={`${btn.secondary} ${btnSize.sm} shrink-0`}
                           aria-label={book.excluded
                             ? t('duplicateCandidates.include', 'Include')

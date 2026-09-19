@@ -124,6 +124,32 @@ describe('DuplicateCandidatesModal', () => {
     await waitFor(() => expect(api.toggleExcluded).toHaveBeenCalledWith(14))
   })
 
+  it('keeps an in-flight row disabled while another row is toggling', async () => {
+    // Two toggles in flight at once: with a single shared busy id, starting
+    // the second used to re-enable the first row's button, so a second click
+    // could fire an overlapping flip that cancels the first out silently.
+    const pending: Array<(value: DuplicateCandidateMember) => void> = []
+    vi.mocked(api.toggleExcluded).mockImplementation(
+      () => new Promise<DuplicateCandidateMember>(resolve => { pending.push(resolve) }),
+    )
+    render(<DuplicateCandidatesModal authorId={7} authorName="Andy Weir" onClose={() => {}} />)
+
+    const [first, second] = await screen.findAllByRole('button', { name: 'Exclude' })
+    fireEvent.click(first)
+    expect(first).toBeDisabled()
+    fireEvent.click(second)
+    expect(first).toBeDisabled()
+    expect(second).toBeDisabled()
+
+    pending.forEach(resolve => resolve(book(11, 'Dune', true)))
+    await waitFor(() => {
+      const buttons = screen.getAllByRole('button', { name: 'Exclude' })
+      expect(buttons[0]).not.toBeDisabled()
+      expect(buttons[1]).not.toBeDisabled()
+    })
+    expect(api.toggleExcluded).toHaveBeenCalledTimes(2)
+  })
+
   it('shows the load error when the request fails', async () => {
     vi.mocked(api.listAuthorDuplicateCandidates).mockRejectedValue(new Error('boom'))
     render(<DuplicateCandidatesModal authorId={7} authorName="Andy Weir" onClose={() => {}} />)
