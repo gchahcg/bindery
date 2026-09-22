@@ -153,7 +153,7 @@ func TestPushToCalibre_ModeOff(t *testing.T) {
 	fc := &fakeCalibreAdder{nextID: 99}
 	s.WithCalibre(modeFn(calibre.ModeOff), fc)
 
-	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub")
+	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub", models.MediaTypeEbook)
 
 	if len(fc.calls) != 0 {
 		t.Errorf("Add must not be called when mode=off, got %v", fc.calls)
@@ -169,7 +169,7 @@ func TestPushToCalibre_ModeCalibredbHappyPath(t *testing.T) {
 	fc := &fakeCalibreAdder{nextID: 1234}
 	s.WithCalibre(modeFn(calibre.ModeCalibredb), fc)
 
-	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub")
+	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub", models.MediaTypeEbook)
 
 	if len(fc.calls) != 1 || fc.calls[0] != "/library/book.epub" {
 		t.Errorf("Add calls = %v", fc.calls)
@@ -190,7 +190,7 @@ func TestPushToCalibre_CalibredbFailDoesNotPoison(t *testing.T) {
 	fc := &fakeCalibreAdder{err: errors.New("exec: calibredb: not found")}
 	s.WithCalibre(modeFn(calibre.ModeCalibredb), fc)
 
-	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub")
+	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub", models.MediaTypeEbook)
 
 	got, _ := bookRepo.GetByID(ctx, book.ID)
 	if got.CalibreID != nil {
@@ -198,14 +198,16 @@ func TestPushToCalibre_CalibredbFailDoesNotPoison(t *testing.T) {
 	}
 }
 
-// TestPushToCalibre_ErrDisabledSilent — the adder may return ErrDisabled
-// when the client's own config is off; we treat it the same as mode=off.
-func TestPushToCalibre_ErrDisabledSilent(t *testing.T) {
+// TestPushToCalibre_ErrDisabledDoesNotPersistAnID: ErrDisabled is now a
+// warning rather than a silent return (the adder is built from the same
+// settings read as the mode, so the two disagreeing is a bug), but it still
+// must not mutate the book row.
+func TestPushToCalibre_ErrDisabledDoesNotPersistAnID(t *testing.T) {
 	s, bookRepo, book, author, ctx := importScannerFixture(t)
 	fc := &fakeCalibreAdder{err: calibre.ErrDisabled}
 	s.WithCalibre(modeFn(calibre.ModeCalibredb), fc)
 
-	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub")
+	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub", models.MediaTypeEbook)
 
 	got, _ := bookRepo.GetByID(ctx, book.ID)
 	if got.CalibreID != nil {
@@ -228,7 +230,7 @@ func TestPushToCalibre_ModePluginHappyPath(t *testing.T) {
 	client := calibre.NewPluginClient(srv.URL, "test-key")
 	s.WithCalibre(modeFn(calibre.ModePlugin), client)
 
-	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub")
+	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub", models.MediaTypeEbook)
 
 	got, _ := bookRepo.GetByID(ctx, book.ID)
 	if got.CalibreID == nil || *got.CalibreID != 5678 {
@@ -242,7 +244,7 @@ func TestPushToCalibre_ModePluginHappyPath(t *testing.T) {
 func TestPushToCalibre_NilResolver(t *testing.T) {
 	s, _, book, author, ctx := importScannerFixture(t)
 	// No WithCalibre call.
-	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub") // must not panic
+	s.pushToCalibre(ctx, book, author, nil, "", "", "/library/book.epub", models.MediaTypeEbook) // must not panic
 }
 
 func TestCalibreMetadata_PrefersEditionFieldsAndMapsSeries(t *testing.T) {
@@ -274,7 +276,7 @@ func TestCalibreMetadata_PrefersEditionFieldsAndMapsSeries(t *testing.T) {
 	}
 
 	s := NewScanner(nil, nil, nil, nil, nil, t.TempDir(), "", "", "", "")
-	meta := s.calibreMetadata(ctx, book, author, edition, "Dune Chronicles", "1", calibre.ModeCalibredb)
+	meta := s.calibreMetadata(ctx, book, author, edition, "Dune Chronicles", "1", &fakeCalibreAdder{})
 
 	if meta.Title != "Dune" || len(meta.Authors) != 1 || meta.Authors[0] != "Frank Herbert" {
 		t.Fatalf("basic metadata = %+v", meta)
@@ -328,7 +330,7 @@ func TestCalibreMetadata_NormalizesPresentProviderIdentifiers(t *testing.T) {
 				MetadataProvider: tt.provider,
 			}
 			s := NewScanner(nil, nil, nil, nil, nil, t.TempDir(), "", "", "", "")
-			meta := s.calibreMetadata(ctx, book, nil, nil, "", "", calibre.ModePlugin)
+			meta := s.calibreMetadata(ctx, book, nil, nil, "", "", &fakeCalibreAdder{})
 			if meta.Identifiers[tt.wantType] != tt.wantValue {
 				t.Fatalf("identifier %q = %q, want %q in %+v", tt.wantType, meta.Identifiers[tt.wantType], tt.wantValue, meta.Identifiers)
 			}
@@ -339,7 +341,11 @@ func TestCalibreMetadata_NormalizesPresentProviderIdentifiers(t *testing.T) {
 	}
 }
 
-func TestCalibreMetadata_CoverPathOnlyForCalibredb(t *testing.T) {
+// TestCalibreMetadata_CoverPathFollowsTheTargetCapability replaces an older
+// test that asserted covers were for calibredb only. They now go to any target
+// that says it can apply one, which is what review item 9 asked for; an adder
+// with no capability list, i.e. calibredb, is assumed capable.
+func TestCalibreMetadata_CoverPathFollowsTheTargetCapability(t *testing.T) {
 	ctx := context.Background()
 	cacheDir := t.TempDir()
 	imageURL := "https://93.184.216.34/cover.jpg"
@@ -357,14 +363,19 @@ func TestCalibreMetadata_CoverPathOnlyForCalibredb(t *testing.T) {
 	}
 	s := NewScanner(nil, nil, nil, nil, nil, t.TempDir(), "", "", "", "").WithCalibreCoverCache(cacheDir)
 
-	calibredbMeta := s.calibreMetadata(ctx, book, nil, nil, "", "", calibre.ModeCalibredb)
+	calibredbMeta := s.calibreMetadata(ctx, book, nil, nil, "", "", &fakeCalibreAdder{})
 	if calibredbMeta.CoverPath != coverPath {
 		t.Fatalf("calibredb CoverPath = %q, want %q", calibredbMeta.CoverPath, coverPath)
 	}
 
-	pluginMeta := s.calibreMetadata(ctx, book, nil, nil, "", "", calibre.ModePlugin)
+	capable := s.calibreMetadata(ctx, book, nil, nil, "", "", &recordingAdder{supportsCover: true})
+	if capable.CoverPath != coverPath {
+		t.Fatalf("capable plugin CoverPath = %q, want %q", capable.CoverPath, coverPath)
+	}
+
+	pluginMeta := s.calibreMetadata(ctx, book, nil, nil, "", "", &recordingAdder{supportsCover: false})
 	if pluginMeta.CoverPath != "" {
-		t.Fatalf("plugin CoverPath = %q, want empty", pluginMeta.CoverPath)
+		t.Fatalf("plugin CoverPath = %q, want empty without the cover capability", pluginMeta.CoverPath)
 	}
 }
 
@@ -389,20 +400,20 @@ func TestCalibreMetadata_StoredCoverResolvesFromStore(t *testing.T) {
 		WithCalibreCoverCache(t.TempDir()).
 		WithCoverStore(store)
 
-	meta := s.calibreMetadata(ctx, book, nil, nil, "", "", calibre.ModeCalibredb)
+	meta := s.calibreMetadata(ctx, book, nil, nil, "", "", &fakeCalibreAdder{})
 	if meta.CoverPath != want {
 		t.Fatalf("CoverPath = %q, want stored file %q", meta.CoverPath, want)
 	}
 
 	// The edition's reference wins over the book's, as for any other cover.
 	edition := &models.Edition{ImageURL: covers.Scheme + strings.Repeat("0", 64) + ".jpg"}
-	if meta := s.calibreMetadata(ctx, book, nil, edition, "", "", calibre.ModeCalibredb); meta.CoverPath != "" {
+	if meta := s.calibreMetadata(ctx, book, nil, edition, "", "", &fakeCalibreAdder{}); meta.CoverPath != "" {
 		t.Fatalf("absent stored cover gave CoverPath %q, want empty", meta.CoverPath)
 	}
 
 	// No store wired: nothing to hand over, and no fetch attempted.
 	bare := NewScanner(nil, nil, nil, nil, nil, t.TempDir(), "", "", "", "").WithCalibreCoverCache(t.TempDir())
-	if meta := bare.calibreMetadata(ctx, book, nil, nil, "", "", calibre.ModeCalibredb); meta.CoverPath != "" {
+	if meta := bare.calibreMetadata(ctx, book, nil, nil, "", "", &fakeCalibreAdder{}); meta.CoverPath != "" {
 		t.Fatalf("no store gave CoverPath %q, want empty", meta.CoverPath)
 	}
 }
