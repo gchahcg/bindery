@@ -258,7 +258,7 @@ func TestScanGrouping(t *testing.T) {
 		books[i].ID = int64(i + 1)
 	}
 
-	groups := Scan(books)
+	groups := Scan(books, nil)
 	if len(groups) != 2 {
 		t.Fatalf("Scan = %d groups, want 2 (dune pair; dune part two pair)", len(groups))
 	}
@@ -293,7 +293,7 @@ func TestScanTransitiveChain(t *testing.T) {
 		books[i].ID = int64(i + 1)
 	}
 
-	groups := Scan(books)
+	groups := Scan(books, nil)
 	if len(groups) != 1 {
 		t.Fatalf("Scan = %d groups, want 1", len(groups))
 	}
@@ -314,7 +314,7 @@ func TestScanBlankTitles(t *testing.T) {
 	for i := range books {
 		books[i].ID = int64(i + 1)
 	}
-	if groups := Scan(books); len(groups) != 0 {
+	if groups := Scan(books, nil); len(groups) != 0 {
 		t.Fatalf("Scan = %d groups, want 0 (blank titles never group)", len(groups))
 	}
 }
@@ -329,7 +329,7 @@ func TestScanIsExclusionAgnostic(t *testing.T) {
 	b.ID = 2
 	b.Excluded = true
 
-	groups := Scan([]models.Book{a, b})
+	groups := Scan([]models.Book{a, b}, nil)
 	if len(groups) != 1 || len(groups[0].Members) != 2 {
 		t.Fatalf("excluded member must still be scanned: got %d groups", len(groups))
 	}
@@ -350,7 +350,7 @@ func TestScanDeterministicUnderShuffle(t *testing.T) {
 		}
 		return books
 	}
-	first := render(Scan(mk()))
+	first := render(Scan(mk(), nil))
 	// Rebuild with a different input order, same books.
 	src := mk()
 	order := []int{2, 0, 3, 1, 4}
@@ -358,7 +358,7 @@ func TestScanDeterministicUnderShuffle(t *testing.T) {
 	for i, s := range order {
 		shuffled[i] = src[s]
 	}
-	if second := render(Scan(shuffled)); second != first {
+	if second := render(Scan(shuffled, nil)); second != first {
 		t.Errorf("scan order-dependent:\nfirst = %s\nsecond = %s", first, second)
 	}
 }
@@ -394,6 +394,68 @@ func rulesContain(rules []RuleID, want RuleID) bool {
 	return false
 }
 
+// TestScanSuppressesSubstringAcrossSeriesPositions pins the #1970 review
+// finding: the substring rule alone groups separate books in a series when a
+// long first title doubles as the series name ("Foundation" is a substring
+// of "Foundation and Empire"). When both books are known, different
+// positions in the same series, that is by definition two different works,
+// so the substring match must be suppressed even though the folded titles
+// still look contained. The other rules are untouched — they require the
+// folded keys to already agree, which two different titles never do.
+func TestScanSuppressesSubstringAcrossSeriesPositions(t *testing.T) {
+	foundation := book("Foundation")
+	foundation.ID = 1
+	foundationAndEmpire := book("Foundation and Empire")
+	foundationAndEmpire.ID = 2
+	secondFoundation := book("Second Foundation")
+	secondFoundation.ID = 3
+
+	books := []models.Book{foundation, foundationAndEmpire, secondFoundation}
+	slots := map[int64][]SeriesSlot{
+		1: {{SeriesID: 100, Position: "1"}},
+		2: {{SeriesID: 100, Position: "2"}},
+		3: {{SeriesID: 100, Position: "3"}},
+	}
+
+	if groups := Scan(books, slots); len(groups) != 0 {
+		t.Fatalf("Scan with series positions = %d groups, want 0 (all different positions)", len(groups))
+	}
+
+	// Without series data, the same three books still fall into the known
+	// false-positive trap — this is the "series links unavailable" fallback
+	// the review accepted, pinned here so a future change to the guard
+	// doesn't silently start suppressing more than it should.
+	if groups := Scan(books, nil); len(groups) == 0 {
+		t.Fatal("Scan with no series data = 0 groups, want the substring false positive (documents the fallback)")
+	}
+}
+
+// TestScanKeepsSubstringWithinSameSeriesPosition pins that the suppression is
+// specific to DIFFERENT positions: a genuine subtitle variant of the same
+// entry ("Mistborn" vs "Mistborn: The Final Empire", both position "1") must
+// still group — same-position series data is not a reason to distrust
+// substring, only cross-position data is.
+func TestScanKeepsSubstringWithinSameSeriesPosition(t *testing.T) {
+	mistborn := book("Mistborn")
+	mistborn.ID = 1
+	mistbornFull := book("Mistborn: The Final Empire")
+	mistbornFull.ID = 2
+
+	books := []models.Book{mistborn, mistbornFull}
+	slots := map[int64][]SeriesSlot{
+		1: {{SeriesID: 200, Position: "1"}},
+		2: {{SeriesID: 200, Position: "1"}},
+	}
+
+	groups := Scan(books, slots)
+	if len(groups) != 1 {
+		t.Fatalf("Scan = %d groups, want 1 (same series position, still a substring match)", len(groups))
+	}
+	if !rulesContain(groups[0].Rules, RuleSubstring) {
+		t.Errorf("group rules = %v, want substring", groups[0].Rules)
+	}
+}
+
 // TestScanScale pins the performance budget from the plan: 500 books with a
 // few duplicate pairs must scan in well under 100ms.
 func TestScanScale(t *testing.T) {
@@ -416,7 +478,7 @@ func TestScanScale(t *testing.T) {
 	}
 
 	start := time.Now()
-	groups := Scan(books)
+	groups := Scan(books, nil)
 	elapsed := time.Since(start)
 
 	if elapsed > 100*time.Millisecond {

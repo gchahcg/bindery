@@ -186,8 +186,11 @@ group when any of these match: `alnum-equal` (identical after the fold),
 `article-strip` (identical after dropping a leading article),
 `edition-suffix` (identical after dropping a trailing edition marker), or
 `substring` (one folded title contained in the other, with length guards).
-Groups are linked transitively, so A≈B and B≈C lands in one group. The
-response is:
+`substring` is additionally suppressed when both books are known, different
+positions in the same series — a long first title that doubles as the series
+name ("Foundation" vs "Foundation and Empire") would otherwise flag every
+sequel. Groups are linked transitively, so A≈B and B≈C lands in one group.
+The response is:
 
 ```json
 {

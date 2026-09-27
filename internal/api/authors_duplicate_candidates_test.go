@@ -41,6 +41,7 @@ type dupCandFixture struct {
 	ctx     context.Context
 	authors *db.AuthorRepo
 	books   *db.BookRepo
+	series  *db.SeriesRepo
 	handler *AuthorHandler
 }
 
@@ -55,11 +56,13 @@ func newDupCandFixture(t *testing.T) (*dupCandFixture, *models.Author) {
 	ctx := context.Background()
 	authors := db.NewAuthorRepo(database)
 	books := db.NewBookRepo(database)
+	series := db.NewSeriesRepo(database)
 	f := &dupCandFixture{
 		ctx:     ctx,
 		authors: authors,
 		books:   books,
-		handler: NewAuthorHandler(authors, nil, books, nil, nil, nil, nil, nil),
+		series:  series,
+		handler: NewAuthorHandler(authors, nil, books, series, nil, nil, nil, nil),
 	}
 	author := &models.Author{Name: "Andy Weir", SortName: "Weir, Andy", Monitored: true}
 	if err := authors.Create(ctx, author); err != nil {
@@ -91,6 +94,20 @@ func (f *dupCandFixture) addBook(t *testing.T, authorID int64, title, foreignID 
 		}
 	}
 	return b
+}
+
+// linkSeries creates (or reuses, by foreignID) a series and links book at the
+// given position — the real DB path the review asked DuplicateCandidates to
+// use so the substring rule can tell a series' own sequels apart.
+func (f *dupCandFixture) linkSeries(t *testing.T, foreignID, title string, bookID int64, position string) {
+	t.Helper()
+	s := &models.Series{ForeignID: foreignID, Title: title}
+	if err := f.series.CreateOrGet(f.ctx, s); err != nil {
+		t.Fatalf("create series %q: %v", title, err)
+	}
+	if err := f.series.LinkBook(f.ctx, s.ID, bookID, position, false); err != nil {
+		t.Fatalf("link book %d to series %q at %q: %v", bookID, title, position, err)
+	}
 }
 
 func (f *dupCandFixture) get(t *testing.T, authorID int64, userID int64) *httptest.ResponseRecorder {
@@ -169,6 +186,45 @@ func TestDuplicateCandidates_ReturnsGroupsWithRules(t *testing.T) {
 	m3rules := rulesByID(martian.Books, m3.ID)
 	if !contains(m3rules, "article-strip") {
 		t.Errorf("member %q rules = %v, want article-strip", "Martian", m3rules)
+	}
+}
+
+// TestDuplicateCandidates_SeriesPositionsSuppressSubstring is the end-to-end
+// form of the #1970 review finding: "Foundation" is a folded substring of
+// "Foundation and Empire", but real series data (different, known positions
+// in the same series) proves they are different books, and the endpoint must
+// not report them as a candidate pair. "Mistborn" / "Mistborn: The Final
+// Empire" share a series position, so that pair still groups.
+func TestDuplicateCandidates_SeriesPositionsSuppressSubstring(t *testing.T) {
+	f, author := newDupCandFixture(t)
+
+	foundation := f.addBook(t, author.ID, "Foundation", "OL6001W", false)
+	foundationAndEmpire := f.addBook(t, author.ID, "Foundation and Empire", "OL6002W", false)
+	secondFoundation := f.addBook(t, author.ID, "Second Foundation", "OL6003W", false)
+	f.linkSeries(t, "OLS1S", "Foundation", foundation.ID, "1")
+	f.linkSeries(t, "OLS1S", "Foundation", foundationAndEmpire.ID, "2")
+	f.linkSeries(t, "OLS1S", "Foundation", secondFoundation.ID, "3")
+
+	mistborn := f.addBook(t, author.ID, "Mistborn", "OL6004W", false)
+	mistbornFull := f.addBook(t, author.ID, "Mistborn: The Final Empire", "OL6005W", false)
+	f.linkSeries(t, "OLS2S", "Mistborn", mistborn.ID, "1")
+	f.linkSeries(t, "OLS2S", "Mistborn", mistbornFull.ID, "1")
+
+	rec := f.get(t, author.ID, 0)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := parseDupCand(t, rec)
+
+	if resp.Count != 1 || len(resp.Groups) != 1 {
+		t.Fatalf("count = %d, groups = %d; want 1 (Foundation trio suppressed, Mistborn kept)", resp.Count, len(resp.Groups))
+	}
+	g := resp.Groups[0]
+	if g.Key != "mistborn" {
+		t.Fatalf("group key = %q, want mistborn", g.Key)
+	}
+	if len(g.Books) != 2 {
+		t.Fatalf("mistborn group has %d books, want 2", len(g.Books))
 	}
 }
 

@@ -26,6 +26,13 @@ type duplicateCandidatesResponse struct {
 // route (PUT /book/{id}/exclude), which the UI calls only after a human
 // confirms. That is the whole safety model of #1970 — aggressive detection,
 // human in the loop, no silent merges.
+//
+// It also passes each book's series memberships to Scan (#1970 review), so
+// the substring rule can be suppressed between two books that are different,
+// known positions in the same series — a long first title that doubles as
+// the series name ("Foundation" vs "Foundation and Empire") would otherwise
+// group with its own sequels. h.series is optional (nil in tests that don't
+// need it); without it, this simply falls back to the pre-review behaviour.
 func (h *AuthorHandler) DuplicateCandidates(w http.ResponseWriter, r *http.Request) {
 	author, ok := h.loadOwnedAuthor(w, r)
 	if !ok {
@@ -36,7 +43,24 @@ func (h *AuthorHandler) DuplicateCandidates(w http.ResponseWriter, r *http.Reque
 		writeServerError(w, r, err)
 		return
 	}
-	groups := duplicates.Scan(books)
+	var seriesSlots map[int64][]duplicates.SeriesSlot
+	if h.series != nil {
+		memberships, err := h.series.ListBookSeriesMembershipsByAuthor(r.Context(), author.ID)
+		if err != nil {
+			writeServerError(w, r, err)
+			return
+		}
+		seriesSlots = make(map[int64][]duplicates.SeriesSlot, len(memberships))
+		for bookID, ms := range memberships {
+			for _, m := range ms {
+				seriesSlots[bookID] = append(seriesSlots[bookID], duplicates.SeriesSlot{
+					SeriesID: m.SeriesID,
+					Position: m.Position,
+				})
+			}
+		}
+	}
+	groups := duplicates.Scan(books, seriesSlots)
 	active := groups[:0]
 	for i := range groups {
 		n := 0

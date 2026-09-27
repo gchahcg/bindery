@@ -74,6 +74,37 @@ const (
 // aggressive.
 const maxPairwiseBooks = 2000
 
+// SeriesSlot is the minimal series-membership fact Scan needs to suppress a
+// substring false positive between two genuinely different books in the same
+// series (#1970 review: "Foundation" grouping with "Foundation and Empire").
+// Two different positions in one series are, by definition, different works,
+// even when one title is a prefix of the other. Position is compared as an
+// opaque string ("1" and "1.5" differ, correctly); an empty Position is
+// unknown and never suppresses anything, so a catalogue with no series data
+// keeps today's behaviour.
+type SeriesSlot struct {
+	SeriesID int64
+	Position string
+}
+
+// sameSeriesDifferentPosition reports whether a and b share a series but hold
+// different known positions in it. Only a resolved Position on both sides
+// counts — an unresolved one (no position recorded) never suppresses, because
+// "unknown" must not be read as "different".
+func sameSeriesDifferentPosition(a, b []SeriesSlot) bool {
+	for _, sa := range a {
+		if sa.Position == "" {
+			continue
+		}
+		for _, sb := range b {
+			if sb.SeriesID == sa.SeriesID && sb.Position != "" && sb.Position != sa.Position {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // aggressiveFold reduces a title to the shared comparison alphabet — NFC,
 // lowercase, apostrophes deleted, umlauts expanded, everything else a space
 // (textutil.FoldForTitleMatch, the alphabet every title comparison in the
@@ -296,12 +327,17 @@ func bookKeyFor(title string) bookKeys {
 // members count as active) belongs to the caller, which is the only layer
 // that can act on the result.
 //
+// seriesSlots is an optional (nil is fine) lookup from book ID to that book's
+// series memberships, used solely to suppress the substring rule for two
+// books that are different, known positions in the same series (see
+// SeriesSlot). The caller collects it because Scan itself does no I/O.
+//
 // Algorithm: keys are precomputed per book; every pair is evaluated (full
-// O(n²) sweep, substring rule gated by maxPairwiseBooks); pairs with at
-// least one firing rule are unioned; the connected components are the
-// groups. Output is deterministic:
-// groups sorted by key, members by book ID.
-func Scan(books []models.Book) []Group {
+// O(n²) sweep, substring rule gated by maxPairwiseBooks); a substring-only
+// match between two different series positions is discarded; pairs with at
+// least one surviving rule are unioned; the connected components are the
+// groups. Output is deterministic: groups sorted by key, members by book ID.
+func Scan(books []models.Book, seriesSlots map[int64][]SeriesSlot) []Group {
 	n := len(books)
 	keys := make([]bookKeys, n)
 	for i, b := range books {
@@ -341,6 +377,10 @@ func Scan(books []models.Book) []Group {
 				continue
 			}
 			rules := pairRules(keys[i], keys[j], useSubstring)
+			if containsRule(rules, RuleSubstring) &&
+				sameSeriesDifferentPosition(seriesSlots[books[i].ID], seriesSlots[books[j].ID]) {
+				rules = removeRule(rules, RuleSubstring)
+			}
 			if len(rules) == 0 {
 				continue
 			}
@@ -423,4 +463,26 @@ func pairRules(a, b bookKeys, useSubstring bool) []RuleID {
 
 func addRule(set map[RuleID]struct{}, rule RuleID) {
 	set[rule] = struct{}{}
+}
+
+func containsRule(rules []RuleID, target RuleID) bool {
+	for _, r := range rules {
+		if r == target {
+			return true
+		}
+	}
+	return false
+}
+
+// removeRule drops one rule from a freshly-built pairRules result. Safe to
+// mutate in place: rules is always a slice pairRules allocated for this call,
+// never one shared with a caller.
+func removeRule(rules []RuleID, target RuleID) []RuleID {
+	out := rules[:0]
+	for _, r := range rules {
+		if r != target {
+			out = append(out, r)
+		}
+	}
+	return out
 }
