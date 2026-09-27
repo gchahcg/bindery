@@ -584,7 +584,10 @@ When metadata is wrong, you have three levels of fix:
 2. **Re-bind** the book, or **relink** the author ("Find better match"), to a
    different provider record when the match itself is wrong.
 3. A **metadata profile** (languages, minimum page count, minimum edition
-   count, skip part books) filters what a catalogue sync lets in.
+   count, skip part books) filters what a catalogue sync lets in. Filling a
+   series skips every metadata profile filter today, the edition count included
+   ([#2208](https://github.com/vavallee/bindery/issues/2208)), so a filled
+   series can still bring in thin works.
 
 Box sets need no setting. A work whose title plainly names a bundle ("... Box
 Set", "3 Books Set", "Carton of 10 Signed Copies") is dropped from every
