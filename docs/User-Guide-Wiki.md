@@ -256,14 +256,29 @@ Wanted page and auto-grabs the best release. The **Auto-grab** toggle in
 Settings → Metadata Profiles → Library Defaults turns grabbing off entirely if you prefer to grab by hand
 from the Wanted page. It covers every path that can start a download: the
 scheduled sweep, the searches an author add fires, a series fill, adding a
-single book, adding from recommendations, a bulk **Search** action, a book
-flipping to wanted, and the re-search after a stalled download. A bulk
-**Search** refuses while the switch is off and says which setting to change,
-keeping your selection; a single book's **Search Indexers** still runs, which
+single book, adding from recommendations, a bulk **Search** action, a book's own
+**Automatic search**, a book flipping to wanted, and the re-search after a
+stalled download. A bulk **Search** refuses while the switch is off and says
+which setting to change, keeping your selection; so does a book's
+**Automatic search**. A single book's **Search** still runs, which
 is how you search and grab by hand with grabbing off. Books are
 still created and still marked wanted, so the Wanted page is complete when
 you come back to it. Searches also fire when an author is added
 ("Search for books on add") and when a book flips to wanted.
+
+**Two search buttons on a book page.** They do different things, and for a
+long time only the first one existed (#2668). **Search ebook indexers** (the
+wording follows the book's media type) is interactive: it queries every
+indexer, shows you the releases with their scores, and grabs nothing until you
+press Grab. **Automatic search** is the sweep's own behaviour for this one
+book: Bindery picks the best release itself, sends it to your download client,
+and tells you to watch the Queue and History. Use the first when you want a
+particular release or a particular format, the second when you just want the
+book. Automatic search appears only while the book still needs a format it is
+monitored for, because that is the point at which the automatic path has
+something to look for; once every monitored format is on disk it would do
+nothing, and the interactive button is the one that can still get you a
+different copy.
 
 **Two language titles.** A translated book whose title is stored as
 "translated / original", such as "El imperio final / The Final Empire", is
@@ -308,12 +323,27 @@ it; the hold is what happens when it refuses anyway.
 
 **Decision.** Each release is checked against your quality profile (allowed
 formats), delay profile, blocklist, size limits, and language filter. A
-quality profile is an allow list only; the order you put the formats in is
-not read. When more than one allowed format is found, Bindery prefers its
-built in ranking, best first: azw3, epub, mobi and azw, pdf, rtf, txt for
-ebooks, and flac, m4b, m4a, mp3 for audiobooks.
+quality profile is two ordered lists, ebook formats and audiobook formats;
+only ticked formats may be grabbed, and when more than one ticked format is
+found the one nearest the top of its list wins, on the scheduled sweep and on
+the book page alike.
 On indexers marked *freeleech only*, non-freeleech releases are not discarded
 — they are parked as **pending** for manual approval.
+
+**Quality profiles.** Settings → Quality Profiles. Each profile holds an
+ebook list and an audiobook list, numbered from the top, and top is best.
+Tick a format to allow it and untick it to refuse it; an unticked format is
+never grabbed and never counts in the ranking, wherever it sits. Move a format up or down to change
+which one Bindery prefers. A release that carries several formats, such as
+"azw3 epub", counts as the best ticked one it carries. A list with nothing in
+it means the profile has no opinion on that kind: any format of that kind is
+accepted and ranked by the built in order, which is azw3, epub, mobi and azw,
+pdf, rtf, txt for ebooks, and flac, m4b, m4a, mp3 for audiobooks. That same
+built in order ranks every search for an author with no quality profile at
+all. A list with entries but nothing ticked means nothing of that kind is
+grabbed for the author. Profiles made
+before this rule existed were reversed once on upgrade, so a profile you
+never reordered now reads best first and prefers what it always did.
 
 **Multi-book packs are not auto-grabbed.** A download is linked to exactly
 one book, and the importer works out one destination folder from it, so there
@@ -359,9 +389,14 @@ audiobook with its own title, author, series and identifiers, and refreshes it
 on Reorganize. The book file itself is never modified.
 
 **Queue and History.** The Queue page shows live downloads and, importantly,
-the recovery actions: **Retry import** (after fixing a path remap), **Match to
+the recovery actions: **Retry import** (after fixing a path remap), **Retry
+download** on a row that failed before its files arrived (this re-sends the same
+release, it does not search for a different one), **Match to
 book** (attach a failed import to the right book and import it from disk), and
-per-row error detail. History records every grab/import/failure and can
+per-row error detail. Tick rows for **Retry selected**, or use **Retry all
+failed** to cover every failed row at once. If a download client does not answer
+in time the page says so above the list, so a short Queue is never mistaken for
+lost downloads. History records every grab/import/failure and can
 blocklist a bad release in one click. Blocked releases are listed under
 Settings → Blocklist, where you can remove one to let it be grabbed again.
 
@@ -541,6 +576,40 @@ Things worth knowing:
   folder anywhere Bindery can read, such as your downloads, and it imports
   what it matches into the library, moving or copying the files.
 
+## Restyling files you already have
+
+Your naming template only applies to files Bindery places itself, so changing
+it leaves everything already on disk where it was. **Rename files** is the
+catch-up: it recomputes where every file Bindery tracks should live under the
+current template and moves it there. It reaches the same renamer the import
+path uses, so a reorganized library and a freshly imported one come out
+identical.
+
+Nothing moves until you say so. The preview lists every tracked file with its
+current path, the path the template computes, and why it will or will not move:
+**Will move**, **Already correct**, **Destination exists** (something else is
+already there, so it is skipped rather than overwritten), **Not on disk**, or
+**Error**. Pressing the button applies only the clean moves, and it recomputes
+each destination on the server rather than trusting the list you were shown, so
+a file that changed under you is skipped instead of moved somewhere stale. A
+move is always a move, never a copy, so hardlinks survive and nothing is
+duplicated. Bindery also prunes the folder a file left behind when it empties,
+and refreshes the `metadata.opf` sidecar when you have that turned on.
+
+Three scopes, all the same preview:
+
+| Scope | Where |
+|---|---|
+| One book | the book page, **More** → Rename files |
+| One author | the author page, **More** → Rename files |
+| Your whole library | Settings → General → Library → **Reorganize Library** (#2296) |
+
+**Run Scan library first.** Reorganize only knows about files already attached
+to a book, so anything sitting in your library that no scan has matched is
+invisible to it and stays where it is. That is why the library scoped button
+lives directly below the scan button rather than beside it. It is admin only,
+like everything else on that tab that names server paths.
+
 ## Metadata: where book data comes from
 
 - **OpenLibrary** is the default primary provider — it decides what an
@@ -563,8 +632,27 @@ Things worth knowing:
   — obscure, self-published, and very old titles are more likely to be missing
   — and the API token becomes load-bearing rather than optional, so the
   selector stays disabled until you save one.
+
+  When a metadata profile restricts languages, Bindery checks Hardcover's
+  editions for each author work in one batched request. A translated default
+  edition is not treated as the language of the whole work: any edition in an
+  allowed language keeps the work, while a work is rejected as non-allowed
+  only when the lookup completes and finds no allowed edition. This filtering
+  evidence does not rewrite the displayed language, which remains the
+  provider's preferred/default language or the user's locked value. If the
+  evidence is indeterminate or its lookup fails, normal refreshes fall through
+  to the existing edition-sampled, author-majority, and scalar language before
+  applying **When book language is unknown**. **Reconcile catalogue** treats a
+  failed lookup as indeterminate rather than offering the row for removal.
 - **Google Books** (free API key) and **Audnexus/Audible** (audiobook
   narrator, duration, by ASIN) enrich further.
+
+For a Hardcover audiobook, the chosen audio edition can fill a missing book
+duration before indexer search. Audnex may update that duration when an ASIN is
+available. Explicit audio formats take priority over an unknown format with a
+runtime; runtime breaks ties between equally ranked editions. A runtime alone
+does not turn a known print format into an audiobook. Edition hydration respects
+a manually locked language, including a language deliberately cleared to empty.
 
 Which of those a given book actually came from is on the book page, under
 **Metadata source**. It names the provider, shows the identifier the book is
@@ -718,6 +806,83 @@ requests at most 200 works (`limit=200`), so authors with more than 200 works
 remain marked partial: the warning may stay visible, and reconciliation will
 not remove their `not_in_current_catalogue` rows.
 
+## How author names are filed
+
+One value decides the order of the Authors list, the order of the OPDS author
+feed, and what the `{SortAuthor}` naming token writes: the author's **sort
+name**, which is the display name rewritten as "Last, First". Bindery derives
+it when the author is created, and a metadata refresh replaces it with the
+provider's own sort name whenever the provider supplies one.
+
+So the Authors page is sorted by last name out of the box. **A to Z** in the
+Sort menu gives you Asimov, Atwood, Bardugo; the two **First name** entries are
+the ones that file Isaac under I.
+
+| Display name | Files under | Rule |
+|---|---|---|
+| Isaac Asimov | Asimov, Isaac | the last word is the surname |
+| Robert A. Heinlein | Heinlein, Robert A. | middle names and initials stay with the forename |
+| Martin Luther King Jr. | King, Martin Luther Jr. | a generational suffix (Jr., Sr., II, III, IV) follows the forename |
+| Vincent van Gogh | Gogh, Vincent van | a lowercase particle travels with the forename |
+| Johann Wolfgang von Goethe | Goethe, Johann Wolfgang von | the same rule, German `von` |
+| Ludwig van Beethoven | Beethoven, Ludwig van | the same rule, Dutch `van` |
+| Thomas De Quincey | De Quincey, Thomas | a capitalised particle belongs to the surname |
+| Dick Van Dyke | Van Dyke, Dick | the same rule, so `van` and `Van` file differently |
+| Ursula K. Le Guin | Le Guin, Ursula K. | French `Le` leads whatever its case |
+| Daphne du Maurier | Du Maurier, Daphne | French `Du` leads too |
+| Jose de la Cruz | Cruz, Jose de la | a compound particle moves as one unit, never under L |
+| Seanan McGuire | McGuire, Seanan | `Mac`, `Mc`, `O'`, `Fitz`, `St` and `Saint` are part of the surname |
+| Flannery O'Connor | O'Connor, Flannery | the same rule |
+| Madonna | Madonna | a single word name is left alone |
+| Asimov, Isaac | Asimov, Isaac | a name that already carries a comma is left alone, because someone has already inverted it |
+| 村上春樹 | 村上春樹 | a name written entirely in CJK script is already surname first |
+
+Where the particle tables cannot decide, **case decides**: a lowercase particle
+in the middle of a name travels with the forename, a capitalised one stays with
+the surname. That is the BibTeX "von part" convention, and it reproduces the
+Library of Congress outcome without Bindery having to know which language a
+name belongs to.
+
+It is a heuristic, and the limits are worth knowing:
+
+- Anyone who writes their own particle against their language's convention is
+  filed the other way round.
+- A Chinese, Japanese or Korean name written in Latin letters is read forename
+  first, because the script is the only signal available. "Cixin Liu" files
+  under Liu, and the same name written "Liu Cixin" files under Cixin.
+- **There is no field for it.** The sort name cannot be edited by hand, in the
+  UI or through the API. An author filed under the wrong letter stays there
+  until the metadata provider offers a sort name of its own, which the next
+  refresh adopts.
+
+If your naming template uses `{SortAuthor}`, the same value names the folder on
+disk, so the letter an author files under and the folder it lives in always
+agree.
+
+## Settings most people never touch
+
+The curated Settings tabs hold the things nearly every install cares about. Behind
+them Bindery stores its whole configuration as plain key/value rows, and
+**Settings, Advanced** shows all of them: the key, what it holds, its default, the
+values it accepts, and whether the change takes effect now or at the next restart.
+
+Reach for it when a guide or an issue names a key rather than a screen, when you
+want to confirm what an install has actually stored, or for the rare knob that
+never earned a control of its own. Three things it will not let you do, all on
+purpose:
+
+- **Credentials are never shown.** An API key or a session secret is stored, not
+  displayed, and the ones with their own screen are only editable there.
+- **Rows Bindery writes for itself are read only.** Resume points, last run
+  timestamps and one shot guards are shown so you can see them, and hand editing
+  them corrupts whatever wrote them.
+- **Keys nothing reads are labelled as such**, rather than quietly accepting a
+  value that changes nothing. A key Bindery does not recognise at all is flagged
+  and can be removed.
+
+Every entry carries its own description, in English, written where the setting is
+defined rather than translated per language.
+
 ## What Bindery deliberately does not do
 
 Knowing the edges saves time:
@@ -758,7 +923,8 @@ Fixed (#2186). A book now shows whichever of its tracked files still exists,
 and a **Scan Library** run repairs books that were already stuck on a dead
 path. The old entry stays listed under the book's **Files**; **Forget this
 file** clears it without touching the disk. Use **Rename files** rather than
-moving things by hand and it never happens.
+moving things by hand and it never happens
+([Restyling files you already have](#restyling-files-you-already-have)).
 ([troubleshooting](Troubleshooting-Wiki.md))
 
 **I added one book and got the author's whole back catalogue.**
@@ -772,6 +938,14 @@ Delete is undone by the next metadata refresh, for an author still set to take
 new items. It is not undone for an author you unmonitored or set to *Don't add
 them* — including one whose books you deleted all of. Use **Exclude** if you
 want the book gone regardless of how the author is monitored later.
+
+**An author is filed under the wrong letter.**
+The Authors list sorts by sort name, the display name rewritten as "Last,
+First" ([How author names are filed](#how-author-names-are-filed)). Particles
+are settled by case, so a lowercase `van` files under the word after it and a
+capitalised `Van` files under V. There is no field to correct it by hand; a
+metadata refresh takes the provider's own sort name when it has one. The two
+**First name** entries in the Sort menu order by display name instead.
 
 **A book is on hardcover.app but doesn't show up in search.**
 No Hardcover token configured — set one in Settings → API Keys.

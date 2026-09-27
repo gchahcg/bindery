@@ -259,6 +259,35 @@ POST   /api/v1/rootfolder                         add a new root (admin)
 DELETE /api/v1/rootfolder/{id}                    remove (admin)
 ```
 
+#### Quality profiles
+
+```
+GET    /api/v1/qualityprofile                     list quality profiles
+GET    /api/v1/qualityprofile/{id}                read one
+POST   /api/v1/qualityprofile                     create (admin)
+PUT    /api/v1/qualityprofile/{id}                update (admin)
+DELETE /api/v1/qualityprofile/{id}                remove (admin); 409 while an author uses it
+```
+
+A profile is `{id, name, items, cutoff, upgradeAllowed}`. `items` is an array
+of `{quality, allowed}` in preference order, best first (#2733). The media
+type of each entry is derived from its token on the server (`epub`, `azw3`,
+`pdf` and the other ebook containers on one side; `m4b`, `mp3`, `flac`, `m4a`,
+`ogg` on the other), so one array holds an ebook list and an audiobook list
+and only the relative order inside each kind matters. The web editor writes
+the ebook entries first and the audiobook entries after them; any interleaving
+is accepted and stored as sent, and a read returns the order that was written.
+An unticked entry (`allowed: false`) never makes a release eligible and never
+counts in the ranking. A release is judged and ranked only on the formats of
+the media type being searched, so an audiobook carrying a PDF booklet is
+judged on its audio token for an audiobook search and on its pdf token for an
+ebook one. A media type with no entries at all is not constrained: any format
+of that kind is accepted and ranked by the built in order, which
+`docs/User-Guide-Wiki.md` names. A token Bindery
+does not recognise is stored and ignored. Duplicates, an empty `items` and a
+list with nothing allowed are refused with `400`. `cutoff` and
+`upgradeAllowed` are accepted and stored but read by nothing.
+
 #### Per-indexer daily query cap
 
 `dailyQueryLimit` on an indexer caps how many requests Bindery will send it in a
@@ -329,8 +358,12 @@ POST   /api/v1/downloadclient/{id}/diagnose       path doctor: ordered checks wi
 POST   /api/v1/downloadclient/test                probe an unsaved config (admin)
 
 GET    /api/v1/queue                              active downloads with live downloader overlay
+       -> {"items":[..],"partial":true,"staleClients":[{"clientId":1,"name":"qBit","message":".."}]}
+                                                  partial means a download client did not answer in time, so items is short
 POST   /api/v1/queue/grab                         submit a search result to the download client
-POST   /api/v1/queue/{id}/retry-import           retry an importFailed item without re-downloading
+POST   /api/v1/queue/{id}/retry-import           retry an importFailed/importBlocked item without re-downloading
+POST   /api/v1/queue/{id}/retry                   re-send a failed item's release to the download client (no re-search)
+POST   /api/v1/queue/bulk-retry                   retry many; {"ids":[..]}; per id {"ok":true,"action":"import"|"resend"}
 DELETE /api/v1/queue/{id}                         remove (also from the download client)
        ?deleteFiles=true                          have the client destroy the data too
        ?removeFromClient=false                    forget Bindery's row only, leave the torrent/NZB in the client
@@ -671,6 +704,7 @@ GET    /api/v1/auth/users                         list users (admin)
 POST   /api/v1/auth/users                         create (admin)
 DELETE /api/v1/auth/users/{id}                    delete (admin)
 PUT    /api/v1/auth/users/{id}/role               change role (admin), body {"role": "admin"|"user"|"requester"}
+PUT    /api/v1/auth/users/{id}/auto-approve       per-account request auto-approval (admin), body {"enabled": true|false}
 PUT    /api/v1/auth/users/{id}/reset-password     reset (admin)
 ```
 

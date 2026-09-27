@@ -87,6 +87,11 @@ type MatchCriteria struct {
 	MediaType        string   // models.MediaTypeEbook or models.MediaTypeAudiobook
 	AllowedLanguages []string // from author's MetadataProfile; empty = no filter
 	AuthorAliases    []string // alternate names (e.g. latin-script romanisations for non-latin authors)
+	// Profile is the author's quality profile. Its stored order ranks the
+	// results, top is best, per media type (see quality_order.go). nil, or a
+	// profile with no entry for the media type in question, ranks by
+	// models.QualityRank as before.
+	Profile *models.QualityProfile
 }
 
 // CriteriaISBN picks the ISBN to put in MatchCriteria.ISBN for a book, given
@@ -792,8 +797,17 @@ func filterRelevant(results []newznab.SearchResult, title, author string, aliase
 	title = stripPossessivePrefix(title, author)
 	fullKws := newznab.SigWords(title)
 	primaryKws := newznab.SigWords(primaryTitle(title))
+	// Elision fallback (see newznab.SigWordsElided): an elided title folds to
+	// a single token no release name contains, because release names keep the
+	// separator ("L'Outsider" vs "L.Outsider"). Tried only after the strict
+	// set fails, so possessive matching ("Ender's Game" vs "Enders.Game") is
+	// untouched.
+	fullElided := newznab.SigWordsElided(title)
+	primaryElided := newznab.SigWordsElided(primaryTitle(title))
 	fullIdentity := titleIdentityWords(title)
 	primaryIdentity := titleIdentityWords(primaryTitle(title))
+	fullIdentityElided := titleIdentityWords(newznab.ElideApostrophes(title))
+	primaryIdentityElided := titleIdentityWords(newznab.ElideApostrophes(primaryTitle(title)))
 	authorKws := newznab.SigWords(author)
 
 	authorTokenSets := latinAliasTokenSets(author, aliases)
@@ -805,6 +819,31 @@ func filterRelevant(results []newznab.SearchResult, title, author string, aliase
 			}
 		}
 		return false
+	}
+
+	// tryMatchElided retries a FAILED strict match with the apostrophe-
+	// separated reading of the same title. Never tried first, and skipped
+	// when the two readings are identical, so every result that matches today
+	// still matches for the same reason.
+	tryMatchElided := func(n string, elided, kws []string) bool {
+		if len(elided) == 0 || sameKws(elided, kws) {
+			return false
+		}
+		return tryMatch(n, elided)
+	}
+
+	// identityOK applies the title-identity gate, accepting the elided reading
+	// as well. "Sac d'os" folds to the identity words [sac dos], which
+	// "Sac.d.os.2015.FR" ([sac 2015]) cannot satisfy; the separated reading
+	// yields [sac], which it can.
+	identityOK := func(haystack string, ident, elided []string) bool {
+		if len(ident) < 2 {
+			return true
+		}
+		if ContainsPhrase(haystack, ident) {
+			return true
+		}
+		return len(elided) > 0 && ContainsPhrase(haystack, elided)
 	}
 
 	if len(fullKws) == 0 && len(primaryKws) == 0 && len(authorKws) == 0 {
@@ -830,10 +869,12 @@ func filterRelevant(results []newznab.SearchResult, title, author string, aliase
 
 		// allowFallback=true: each result gets phrase match first, then keyword
 		// fallback if the phrase fails. No batch-level gate.
-		fullOK := tryMatch(n, fullKws) && (len(fullIdentity) < 2 || ContainsPhrase(identity, fullIdentity))
+		fullOK := (tryMatch(n, fullKws) || tryMatchElided(n, fullElided, fullKws)) &&
+			identityOK(identity, fullIdentity, fullIdentityElided)
 		primaryOK := false
 		if !fullOK && len(primaryKws) > 0 && !sameKws(primaryKws, fullKws) {
-			primaryOK = tryMatch(n, primaryKws) && (len(primaryIdentity) < 2 || ContainsPhrase(identity, primaryIdentity))
+			primaryOK = (tryMatch(n, primaryKws) || tryMatchElided(n, primaryElided, primaryKws)) &&
+				identityOK(identity, primaryIdentity, primaryIdentityElided)
 		}
 		if fullOK || primaryOK {
 			filtered = append(filtered, r)
@@ -904,15 +945,19 @@ func dedupe(results []newznab.SearchResult) []newznab.SearchResult {
 
 // rankResults sorts results in place by a composite score combining format
 // quality, edition markers (RETAIL/UNABRIDGED/ABRIDGED), year match against
-// the book's release year, grabs, size, and an ISBN exact-match boost.
+// the book's release year, grabs, size, and an ISBN exact-match boost. The
+// format term follows c.Profile's stored order when the profile has an
+// opinion on the media type in question (quality_order.go); the profile is
+// compiled once here, not per result.
 func rankResults(results []newznab.SearchResult, c MatchCriteria) {
 	type scored struct {
 		r     newznab.SearchResult
 		score float64
 	}
+	ranks := newProfileRanks(c.Profile)
 	items := make([]scored, len(results))
 	for i, r := range results {
-		items[i] = scored{r, scoreResult(r, c)}
+		items[i] = scored{r, scoreResult(r, c, ranks)}
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		return items[i].score > items[j].score
@@ -923,15 +968,34 @@ func rankResults(results []newznab.SearchResult, c MatchCriteria) {
 }
 
 // scoreResult computes the composite ranking score for a single result.
-// Higher is better. Weights are hardcoded (no profile UI in v0.4.0).
-func scoreResult(r newznab.SearchResult, c MatchCriteria) float64 {
+// Higher is better. ranks is c.Profile compiled by rankResults; nil means no
+// profile.
+func scoreResult(r newznab.SearchResult, c MatchCriteria, ranks *profileRanks) float64 {
 	p := ParseRelease(r.Title)
 
 	quality := p.Format
 	if quality == "" {
 		quality = detectQuality(r.Title)
 	}
-	score := float64(models.QualityRank[quality]) * 100
+
+	// Format term. When the search names a media type and the profile has an
+	// opinion on it, the release scores by its best ticked token in the
+	// profile's order, judged over every token in the title so "azw3 epub"
+	// ranks by azw3 although ParseRelease reduces it to epub. Otherwise the
+	// built in QualityRank applies exactly as it did before #2733.
+	//
+	// A search with no media type takes the QualityRank path even when a
+	// profile is present, because a profile's ranks only compare inside one
+	// list: an ebook list of 12 entries scores up to 12 while an audiobook
+	// list of 5 scores up to 5. Every score in one search must be on one
+	// scale, and the only criteria built without a media type today (free
+	// text SearchQuery) carries no profile anyway.
+	var score float64
+	if c.MediaType != "" && ranks.hasOpinion(c.MediaType) {
+		score = float64(ranks.formatScore(ReleaseFormats(r.Title), c.MediaType)) * 100
+	} else {
+		score = float64(models.QualityRank[quality]) * 100
+	}
 
 	// Media-type mismatch penalty. An ebook grab returning an audiobook
 	// format (or vice-versa) is almost certainly the wrong kind of release
