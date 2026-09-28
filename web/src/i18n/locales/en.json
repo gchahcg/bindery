@@ -551,7 +551,7 @@
       "alnum-equal": "Identical once punctuation, case, and diacritics are ignored",
       "article-strip": "Same title with a leading article (The, A, An…) dropped",
       "edition-suffix": "Same title with an edition marker (Unabridged, Audiobook…) dropped",
-      "substring": "One title is contained in the other"
+      "substring": "One title is the main title or subtitle of the other"
     }
   },
   "books": {

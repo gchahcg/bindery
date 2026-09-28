@@ -185,11 +185,12 @@ punctuation, and diacritics ignored; `&` expanded to "and"), and a pair joins a
 group when any of these match: `alnum-equal` (identical after the fold),
 `article-strip` (identical after dropping a leading article),
 `edition-suffix` (identical after dropping a trailing edition marker), or
-`substring` (one folded title contained in the other, with length guards).
-`substring` is additionally suppressed when both books are known, different
-positions in the same series — a long first title that doubles as the series
-name ("Foundation" vs "Foundation and Empire") would otherwise flag every
-sequel. Groups are linked transitively, so A≈B and B≈C lands in one group.
+`substring` (one title is the whole main title or subtitle of the other, split
+at a colon, bracket, or spaced dash, with length guards; "Foundation" does not
+match "Foundation and Empire"). `substring` is additionally suppressed when
+both books are known, different positions in the same series, so "Mistborn"
+at position 1 does not match "Mistborn: The Well of Ascension" at position 2.
+Groups are linked transitively, so A≈B and B≈C lands in one group.
 The response is:
 
 ```json

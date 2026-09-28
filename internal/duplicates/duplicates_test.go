@@ -56,10 +56,27 @@ func TestAggressiveTitleKeyNFC(t *testing.T) {
 	if gotC != gotD {
 		t.Errorf("NFC %q -> %q but NFD %q -> %q; keys must match", composed, gotC, decomposed, gotD)
 	}
-	// é is a letter, so the key keeps it (same alphabet as the dedup fold);
-	// the point of this test is composed == decomposed, not ASCII-isation.
-	if gotC != "caf\u00e9society" {
-		t.Errorf("AggressiveTitleKey(%q) = %q, want caf\u00e9society", composed, gotC)
+	// Latin diacritics are dropped after the umlaut expansion, so both forms
+	// also meet the unaccented spelling a provider may carry.
+	if gotC != "cafesociety" {
+		t.Errorf("AggressiveTitleKey(%q) = %q, want cafesociety", composed, gotC)
+	}
+}
+
+// TestAggressiveTitleKeyFoldsDiacritics pins that an accent-only difference
+// lands in one group (alnum-equal), which is what the UI's rule text says,
+// while umlauts still expand rather than strip.
+func TestAggressiveTitleKeyFoldsDiacritics(t *testing.T) {
+	pairs := [][2]string{
+		{"Les Misérables", "Les Miserables"},
+		{"Cien años de soledad", "Cien anos de soledad"},
+		{"Échec et mort", "Echec et mort"},
+		{"Grüße", "Gruesse"},
+	}
+	for _, p := range pairs {
+		if got := MatchRules(p[0], p[1]); !rulesContain(got, RuleAlnumEqual) {
+			t.Errorf("MatchRules(%q, %q) = %v, want alnum-equal", p[0], p[1], got)
+		}
 	}
 }
 
@@ -421,12 +438,95 @@ func TestScanSuppressesSubstringAcrossSeriesPositions(t *testing.T) {
 		t.Fatalf("Scan with series positions = %d groups, want 0 (all different positions)", len(groups))
 	}
 
-	// Without series data, the same three books still fall into the known
-	// false-positive trap — this is the "series links unavailable" fallback
-	// the review accepted, pinned here so a future change to the guard
-	// doesn't silently start suppressing more than it should.
-	if groups := Scan(books, nil); len(groups) == 0 {
-		t.Fatal("Scan with no series data = 0 groups, want the substring false positive (documents the fallback)")
+	// Without series data the three still must not group: none of the
+	// shorter titles is a whole separator-delimited part of a longer one.
+	// Series links are often missing, so the guard alone was not enough.
+	if groups := Scan(books, nil); len(groups) != 0 {
+		t.Fatalf("Scan with no series data = %d groups, want 0 (no separator boundary)", len(groups))
+	}
+}
+
+// TestScanSeriesGuardAtSeparatorBoundary exercises the series guard on a pair
+// the separator rule DOES match: providers often title a sequel "Series:
+// Title", so "Mistborn" (position 1) is a whole segment of "Mistborn: The
+// Well of Ascension" (position 2). Only the series data tells them apart.
+func TestScanSeriesGuardAtSeparatorBoundary(t *testing.T) {
+	first := book("Mistborn")
+	first.ID = 1
+	second := book("Mistborn: The Well of Ascension")
+	second.ID = 2
+	books := []models.Book{first, second}
+
+	if groups := Scan(books, nil); len(groups) != 1 {
+		t.Fatalf("Scan with no series data = %d groups, want 1 (separator substring match)", len(groups))
+	}
+	slots := map[int64][]SeriesSlot{
+		1: {{SeriesID: 300, Position: "1"}},
+		2: {{SeriesID: 300, Position: "2"}},
+	}
+	if groups := Scan(books, slots); len(groups) != 0 {
+		t.Fatalf("Scan with positions 1 and 2 = %d groups, want 0 (different series positions)", len(groups))
+	}
+	unknown := map[int64][]SeriesSlot{
+		1: {{SeriesID: 300, Position: "1"}},
+		2: {{SeriesID: 300, Position: ""}},
+	}
+	if groups := Scan(books, unknown); len(groups) != 1 {
+		t.Fatalf("Scan with one unknown position = %d groups, want 1 (unknown never suppresses)", len(groups))
+	}
+	otherSeries := map[int64][]SeriesSlot{
+		1: {{SeriesID: 300, Position: "1"}},
+		2: {{SeriesID: 301, Position: "2"}},
+	}
+	if groups := Scan(books, otherSeries); len(groups) != 1 {
+		t.Fatalf("Scan across different series = %d groups, want 1 (guard is per series)", len(groups))
+	}
+}
+
+// TestSubstringRequiresSeparatorBoundary pins the tightened substring rule
+// against real titles from large catalogues (Asimov, King, Pratchett) with
+// no series data, which is the common case for an author whose series links
+// were never created. A bare containment grouped every one of the negative
+// pairs below that clears the length guards.
+func TestSubstringRequiresSeparatorBoundary(t *testing.T) {
+	negatives := [][2]string{
+		{"Foundation", "Foundation and Empire"},
+		{"Foundation", "Second Foundation"},
+		{"Foundation", "Prelude to Foundation"},
+		{"Foundation", "Forward the Foundation"},
+		{"Foundation", "Foundation and Chaos"},
+		{"Foundation", "The Foundation Trilogy"},
+		{"The Dark Tower", "The Dark Tower I: The Gunslinger"},
+		{"The Dark Tower", "The Dark Tower II: The Drawing of the Three"},
+		{"The Science of Discworld", "The Science of Discworld II: The Globe"},
+		{"Fantastic Voyage", "Fantastic Voyage II: Destination Brain"},
+		{"Nightfall", "Nightfall and Other Stories"},
+		{"Buy Jupiter", "Buy Jupiter and Other Stories"},
+		{"Carrie", "Carrie Soto Is Back"},
+		{"Dune", "Dune Messiah"},
+		{"Dune", "Children of Dune"},
+		{"It", "It Ends with Us"},
+	}
+	for _, p := range negatives {
+		if got := MatchRules(p[0], p[1]); rulesContain(got, RuleSubstring) {
+			t.Errorf("MatchRules(%q, %q) = %v, want no substring", p[0], p[1], got)
+		}
+	}
+	positives := [][2]string{
+		{"Mistborn", "Mistborn: The Final Empire"},
+		{"The Final Empire", "Mistborn: The Final Empire"},
+		{"Final Empire", "Mistborn: The Final Empire"},
+		{"The Gunslinger", "The Dark Tower I: The Gunslinger"},
+		{"Hogfather", "Hogfather (Discworld, #20)"},
+		{"Small Gods", "Small Gods: A Discworld Novel"},
+		{"On Writing", "On Writing \u2014 A Memoir of the Craft"},
+		{"Outlander", "Outlander - A Novel"},
+		{"The Foundation Trilogy", "Foundation: The Foundation Trilogy (Unabridged)"},
+	}
+	for _, p := range positives {
+		if got := MatchRules(p[0], p[1]); !rulesContain(got, RuleSubstring) {
+			t.Errorf("MatchRules(%q, %q) = %v, want substring", p[0], p[1], got)
+		}
 	}
 }
 

@@ -25,6 +25,7 @@
 package duplicates
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
@@ -49,8 +50,9 @@ const (
 	// edition qualifier ("Unabridged", "Expanded Edition", ...) is dropped
 	// from each side.
 	RuleEditionSuffix RuleID = "edition-suffix"
-	// RuleSubstring: one key is a substantial substring of the other — the
-	// one-sided subtitle case ("Mistborn" vs "Mistborn: The Final Empire").
+	// RuleSubstring: one title is a whole separator-delimited part of the
+	// other, the one-sided subtitle case ("Mistborn" vs "Mistborn: The Final
+	// Empire"). The API value keeps its original name; see substringMatch.
 	// This is the rule with the highest false-positive rate (a novella whose
 	// title is near-embedded in the parent novel's); it exists because a
 	// human confirms before anything happens.
@@ -60,8 +62,16 @@ const (
 // Guard thresholds for the substring rule. Both apply: the shorter key must
 // be at least minSubstringKeyLen characters (so "Go" never matches "Gone"),
 // and the longer key must carry at least minResidualLen characters BEYOND the
-// embedded one (so "The Martian" never matches "The Martian Child" — the
+// embedded one (so "The Martian" never matches "The Martian Child", where the
 // residual "child" is a different book, not a subtitle).
+//
+// On top of the length guards the containment must sit on a separator
+// boundary (see titleSegments): the shorter title has to be a whole part of
+// the longer one as the longer one is punctuated. A bare substring grouped a
+// series opener with every sequel carrying its name ("Foundation" with
+// "Prelude to Foundation", "The Science of Discworld" with "The Science of
+// Discworld II: The Globe", "Carrie" with "Carrie Soto Is Back") whenever the
+// catalogue had no series links to suppress it with.
 const (
 	minSubstringKeyLen = 6
 	minResidualLen     = 6
@@ -113,8 +123,13 @@ func sameSeriesDifferentPosition(a, b []SeriesSlot) bool {
 // foldPunctuation ("Foundation & Empire" and "Foundation and Empire" are one
 // book), applied here independently so this package never calls a dedup
 // function.
+//
+// The folded result then goes through textutil.FoldForSlug, which drops the
+// remaining Latin and Greek diacritics, so "Les Misérables" and "Les
+// Miserables" share a key. Umlauts are expanded first ("ü" to "ue"), so a
+// German title keeps matching its transliterated spelling.
 func aggressiveFold(title string) string {
-	return textutil.FoldForTitleMatch(strings.ReplaceAll(title, "&", " and "))
+	return textutil.FoldForSlug(textutil.FoldForTitleMatch(strings.ReplaceAll(title, "&", " and ")))
 }
 
 // foldWords is aggressiveFold tokenized into lowercase alnum words.
@@ -226,25 +241,65 @@ func wordsEqual(a, b []string) bool {
 	return true
 }
 
-// substringMatch reports whether the shorter key is a substantial part of the
-// longer one: at least minSubstringKeyLen long itself, leaving at least
-// minResidualLen characters of residual on the longer side, and the residual
-// is not made up solely of edition-marker words. That last guard kills the
+// segmentSplitter matches the punctuation that separates a title from its
+// subtitle or a trailing qualifier: a colon or semicolon, brackets, a spaced
+// hyphen, or an en or em dash. A bare hyphen inside a word ("Half-Blood") is
+// not a separator.
+var segmentSplitter = regexp.MustCompile(`[:;()\[\]{}]|\s-+\s|[\x{2013}\x{2014}]`)
+
+// titleSegments returns the alnum and article-stripped keys of every
+// separator-delimited part of title, or nil when the title has only one part
+// (then no part is a PROPER part, and the whole-title keys already cover it).
+// "Mistborn: The Final Empire" yields mistborn and thefinalempire;
+// "Hogfather (Discworld, #20)" yields hogfather and discworld20.
+func titleSegments(title string) [][2]string {
+	parts := segmentSplitter.Split(title, -1)
+	var segs [][2]string
+	for _, part := range parts {
+		words := foldWords(part)
+		if len(words) == 0 {
+			continue
+		}
+		segs = append(segs, [2]string{
+			strings.Join(words, ""),
+			strings.Join(dropLeadingArticle(words), ""),
+		})
+	}
+	if len(segs) < 2 {
+		return nil
+	}
+	return segs
+}
+
+// substringMatch reports whether the shorter title is a substantial, whole
+// part of the longer one: its key is at least minSubstringKeyLen long,
+// leaves at least minResidualLen characters of residual on the longer side,
+// the residual is not made up solely of edition-marker words, and the
+// shorter key equals one separator-delimited segment of the longer title
+// (compared with and without a leading article). The marker guard kills the
 // "Complete Works of X" vs "Works of X" false positive, where the residual
 // "complete" is doing edition-marker work, not subtitle work.
-func substringMatch(shorter, longer string) bool {
-	if len(shorter) < minSubstringKeyLen {
+func substringMatch(shorter, longer bookKeys) bool {
+	if len(shorter.alnum) < minSubstringKeyLen {
 		return false
 	}
-	idx := strings.Index(longer, shorter)
+	idx := strings.Index(longer.alnum, shorter.alnum)
 	if idx < 0 {
 		return false
 	}
-	if len(longer)-len(shorter) < minResidualLen {
+	if len(longer.alnum)-len(shorter.alnum) < minResidualLen {
 		return false
 	}
-	residual := longer[:idx] + longer[idx+len(shorter):]
-	return !residualIsMarkerOnly(residual)
+	residual := longer.alnum[:idx] + longer.alnum[idx+len(shorter.alnum):]
+	if residualIsMarkerOnly(residual) {
+		return false
+	}
+	for _, seg := range longer.segments {
+		if seg[0] == shorter.alnum || (seg[1] != "" && seg[1] == shorter.article) {
+			return true
+		}
+	}
+	return false
 }
 
 // markerWords is the flat set of every word that appears in editionMarkers,
@@ -307,6 +362,9 @@ type bookKeys struct {
 	article  string
 	edition  string
 	combined string
+	// segments are the keys of each separator-delimited part of the title,
+	// nil for a title with one part. Only the substring rule reads them.
+	segments [][2]string
 }
 
 // bookKeyFor precomputes every key form for one title. Scan calls it once per
@@ -318,6 +376,7 @@ func bookKeyFor(title string) bookKeys {
 		article:  strings.Join(dropLeadingArticle(words), ""),
 		edition:  strings.Join(dropTrailingEditionMarkers(words), ""),
 		combined: strings.Join(dropTrailingEditionMarkers(dropLeadingArticle(words)), ""),
+		segments: titleSegments(title),
 	}
 }
 
@@ -451,10 +510,10 @@ func pairRules(a, b bookKeys, useSubstring bool) []RuleID {
 	}
 	if useSubstring {
 		if len(a.alnum) > len(b.alnum) {
-			if substringMatch(b.alnum, a.alnum) {
+			if substringMatch(b, a) {
 				rules = append(rules, RuleSubstring)
 			}
-		} else if substringMatch(a.alnum, b.alnum) {
+		} else if substringMatch(a, b) {
 			rules = append(rules, RuleSubstring)
 		}
 	}

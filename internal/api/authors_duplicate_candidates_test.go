@@ -209,6 +209,10 @@ func TestDuplicateCandidates_SeriesPositionsSuppressSubstring(t *testing.T) {
 	mistbornFull := f.addBook(t, author.ID, "Mistborn: The Final Empire", "OL6005W", false)
 	f.linkSeries(t, "OLS2S", "Mistborn", mistborn.ID, "1")
 	f.linkSeries(t, "OLS2S", "Mistborn", mistbornFull.ID, "1")
+	// "Mistborn" is a whole separator segment of this sequel's title, so only
+	// the series positions (1 against 2) keep it out of the Mistborn group.
+	wellOfAscension := f.addBook(t, author.ID, "Mistborn: The Well of Ascension", "OL6006W", false)
+	f.linkSeries(t, "OLS2S", "Mistborn", wellOfAscension.ID, "2")
 
 	rec := f.get(t, author.ID, 0)
 	if rec.Code != http.StatusOK {
@@ -224,7 +228,7 @@ func TestDuplicateCandidates_SeriesPositionsSuppressSubstring(t *testing.T) {
 		t.Fatalf("group key = %q, want mistborn", g.Key)
 	}
 	if len(g.Books) != 2 {
-		t.Fatalf("mistborn group has %d books, want 2", len(g.Books))
+		t.Fatalf("mistborn group has %d books, want 2 (the position 2 sequel must stay out)", len(g.Books))
 	}
 }
 
