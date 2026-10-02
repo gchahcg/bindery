@@ -387,6 +387,7 @@ describe('SeriesPage', () => {
       ],
       localOnly: [],
       uncertain: [],
+      covered: [],
       presentCount: 2,
       missingCount: 1,
     })
@@ -750,6 +751,7 @@ describe('SeriesPage', () => {
       ],
       localOnly: [],
       uncertain: [],
+      covered: [],
       presentCount: 0,
       missingCount: 1,
     })
@@ -811,6 +813,7 @@ describe('SeriesPage', () => {
       ],
       localOnly: [],
       uncertain: [],
+      covered: [],
       presentCount: 0,
       missingCount: 1,
     })
@@ -884,6 +887,7 @@ describe('SeriesPage', () => {
       ],
       localOnly: [],
       uncertain: [],
+      covered: [],
       presentCount: 0,
       missingCount: 1,
     })
@@ -896,6 +900,74 @@ describe('SeriesPage', () => {
     expect(bookLink).toHaveAttribute('href', '/book/555')
     const row = within(bookLink).queryByRole('button', { name: 'add' })
     expect(row).not.toBeInTheDocument()
+  })
+
+  // #2524: a split-edition catalogue row is reported under `covered`, not
+  // `missing`, so it must render in its own collapsed section, link to the
+  // whole work that covers it, and never show an add button.
+  it('shows a covered split-edition row in its own section, linked to the owned whole', async () => {
+    const hardcoverLink = {
+      id: 1,
+      seriesId: 43,
+      hardcoverSeriesId: 'hc-series:42',
+      hardcoverProviderId: '42',
+      hardcoverTitle: 'The Stormlight Archive',
+      hardcoverAuthorName: 'Brandon Sanderson',
+      hardcoverBookCount: 3,
+      confidence: 1,
+      linkedBy: 'manual',
+      linkedAt: '2026-01-01T00:00:00Z',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }
+    const series: Series = {
+      id: 43,
+      foreignSeriesId: 'series-43',
+      title: 'The Stormlight Archive',
+      description: '',
+      monitored: true,
+      books: [],
+      hardcoverLink,
+    }
+    vi.mocked(api.getSeriesHardcoverDiff).mockResolvedValue({
+      seriesId: 43,
+      link: hardcoverLink,
+      present: [
+        {
+          foreignBookId: 'hc:the-way-of-kings',
+          providerId: '101',
+          title: 'The Way of Kings',
+          position: '1',
+          authorName: 'Brandon Sanderson',
+          localBookId: 7,
+        },
+      ],
+      missing: [],
+      localOnly: [],
+      uncertain: [],
+      covered: [
+        {
+          foreignBookId: 'hc:the-way-of-kings-part-1',
+          providerId: '101-1',
+          title: 'The Way of Kings, Part 1',
+          position: '1.1',
+          authorName: 'Brandon Sanderson',
+          localBookId: 7,
+          localTitle: 'The Way of Kings',
+        },
+      ],
+      presentCount: 1,
+      missingCount: 0,
+    })
+
+    renderSeriesPage([series])
+
+    fireEvent.click(await screen.findByRole('heading', { name: 'The Stormlight Archive' }))
+    fireEvent.click(await screen.findByText('1 split edition of a book you own'))
+
+    const partLink = await screen.findByRole('link', { name: /The Way of Kings, Part 1/ })
+    expect(partLink).toHaveAttribute('href', '/book/7')
+    expect(within(partLink).queryByRole('button', { name: 'add' })).not.toBeInTheDocument()
   })
 
   it('keeps a Hardcover missing row without a library match non-clickable', async () => {
@@ -937,6 +1009,7 @@ describe('SeriesPage', () => {
       ],
       localOnly: [],
       uncertain: [],
+      covered: [],
       presentCount: 0,
       missingCount: 1,
     })
@@ -986,6 +1059,7 @@ describe('SeriesPage Hardcover links out (#1708)', () => {
     missing: [],
     localOnly: [],
     uncertain: [],
+    covered: [],
     presentCount: 0,
     missingCount: 0,
   }
