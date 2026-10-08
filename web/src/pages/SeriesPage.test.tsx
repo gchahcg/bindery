@@ -1023,6 +1023,15 @@ describe('SeriesPage', () => {
           localBookId: 7,
           localTitle: 'The Way of Kings',
         },
+        {
+          foreignBookId: 'hc:the-way-of-kings-part-2',
+          providerId: '101-2',
+          title: 'The Way of Kings, Part 2',
+          position: '1.2',
+          authorName: 'Brandon Sanderson',
+          localBookId: 7,
+          localTitle: 'The Way of Kings',
+        },
       ],
       presentCount: 1,
       missingCount: 0,
@@ -1031,11 +1040,13 @@ describe('SeriesPage', () => {
     renderSeriesPage([series])
 
     fireEvent.click(await screen.findByRole('heading', { name: 'The Stormlight Archive' }))
-    fireEvent.click(await screen.findByText('1 split edition of a book you own'))
+    // Plural form (i18next _other), not a hand-rolled "s" suffix.
+    fireEvent.click(await screen.findByText('2 split editions of books you own'))
 
     const partLink = await screen.findByRole('link', { name: /The Way of Kings, Part 1/ })
     expect(partLink).toHaveAttribute('href', '/book/7')
     expect(within(partLink).queryByRole('button', { name: 'add' })).not.toBeInTheDocument()
+    expect(within(partLink).getByText('Part of The Way of Kings, already in your library')).toBeInTheDocument()
   })
 
   it('keeps a Hardcover missing row without a library match non-clickable', async () => {

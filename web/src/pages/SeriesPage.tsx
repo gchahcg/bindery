@@ -751,7 +751,7 @@ export default function SeriesPage() {
                     {diff && diff.covered.length > 0 && (
                       <details className="px-4 pb-4">
                         <summary className="cursor-pointer select-none text-xs text-slate-600 dark:text-zinc-500 hover:text-slate-900 dark:hover:text-white">
-                          {diff.covered.length} split edition{diff.covered.length === 1 ? ' of a book you own' : 's of books you own'}
+                          {t('series.hardcover.coveredSection', { count: diff.covered.length })}
                         </summary>
                         <div className="mt-2 space-y-2">
                           {diff.covered.map(book => (
@@ -765,7 +765,9 @@ export default function SeriesPage() {
                               </span>
                               <div className="min-w-0">
                                 <p className="text-sm font-medium truncate">{book.title}</p>
-                                <p className="text-xs text-slate-600 dark:text-zinc-500 truncate">Part of {book.localTitle}, already in your library</p>
+                                <p className="text-xs text-slate-600 dark:text-zinc-500 truncate">
+                                  {t('series.hardcover.coveredSubtitle', { title: book.localTitle })}
+                                </p>
                               </div>
                             </Link>
                           ))}
