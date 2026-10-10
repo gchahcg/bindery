@@ -1446,6 +1446,12 @@ func buildHardcoverDiff(ctx context.Context, books *db.BookRepo, userID int64, s
 	// and pushed the second local's real catalog entry into Missing behind an
 	// Add button that ensureHardcoverCatalogBook's guards then refuse.
 	matchedCatalog := make(map[int]struct{})
+	// presentWholes collects the subset of Present rows eligible to cover a
+	// split-edition part (#2524/#3048): not excluded, and imported or
+	// monitored, the same gate db.ListCoveredSplitEditionParts applies to
+	// stored rows, so the diff and that sweep never disagree about which
+	// wholes cover which parts.
+	presentWholes := make([]presentWhole, 0, len(series.Books))
 	// Identities bind first (#2553). Assigning in library order let an
 	// earlier local's fuzzy title match claim the catalogue slot that a later
 	// local owned by foreign ID: "He Who Fights with Monsters 4" took volume
@@ -1540,6 +1546,14 @@ func buildHardcoverDiff(ctx context.Context, books *db.BookRepo, userID int64, s
 		if match.score >= 90 || match.foreignID {
 			diff.Present = append(diff.Present, item)
 			matchedCatalog[match.index] = struct{}{}
+			if eligibleSplitEditionWhole(local.Book) {
+				presentWholes = append(presentWholes, presentWhole{
+					position:    item.Position,
+					title:       item.Title,
+					localBookID: local.Book.ID,
+					localTitle:  local.Book.Title,
+				})
+			}
 		} else if match.score >= 70 {
 			diff.Uncertain = append(diff.Uncertain, item)
 			matchedCatalog[match.index] = struct{}{}
@@ -1559,10 +1573,11 @@ func buildHardcoverDiff(ctx context.Context, books *db.BookRepo, userID int64, s
 		if title := firstNonEmpty(book.Book.Title, book.Title); metadata.IsUnambiguousBundleTitle(title) {
 			continue
 		}
-		if whole, ok := splitEditionWhole(book, diff.Present); ok {
+		if whole, ok := splitEditionWhole(book, presentWholes); ok {
 			item := catalogDiffBook(book, catalog.AuthorName)
-			item.LocalBookID = whole.LocalBookID
-			item.LocalTitle = whole.LocalTitle
+			id := whole.localBookID
+			item.LocalBookID = &id
+			item.LocalTitle = whole.localTitle
 			diff.Covered = append(diff.Covered, item)
 			continue
 		}
@@ -1575,41 +1590,65 @@ func buildHardcoverDiff(ctx context.Context, books *db.BookRepo, userID int64, s
 	return diff
 }
 
-// splitEditionWhole reports whether book is a split-edition part of some
-// already-present whole work, and if so returns that whole work's diff row.
+// presentWhole is the subset of a Present row that splitEditionWhole needs:
+// a catalogue diff row the library holds, eligible to cover a split-edition
+// part (#2524/#3048). Kept separate from seriesHardcoverDiffBook so the
+// eligibility gate (not excluded, imported or monitored) is decided once,
+// where local.Book is still in scope, rather than re-derived from the API
+// response shape.
+type presentWhole struct {
+	position    string
+	title       string
+	localBookID int64
+	localTitle  string
+}
+
+// eligibleSplitEditionWhole reports whether book is a book the user actually
+// has or wants, so it is allowed to cover a split-edition part (#3048): not
+// excluded, and imported or monitored.
 //
-// #2524: some Hardcover catalogues list a novel AND its split parts at
+// This MUST stay in agreement with the SQL predicate in
+// db.ListCoveredSplitEditionParts (internal/db/split_edition_parts.go),
+// which applies the identical rule to rows already stored. The two cannot
+// share one literal implementation across the SQL/Go boundary, so an
+// eligibility change here needs the same change made there, and vice versa,
+// or the catalogue diff and the stored-row sweep will disagree about which
+// wholes cover which parts.
+func eligibleSplitEditionWhole(b *models.Book) bool {
+	return !b.Excluded && (b.Status == models.BookStatusImported || b.Monitored)
+}
+
+// splitEditionWhole reports whether book is a split-edition part of some
+// already-present, eligible whole work, and if so returns that whole.
+//
+// #2524/#3048: some Hardcover catalogues list a novel AND its split parts at
 // fractional positions under the novel's own position — Stormlight's "The
 // Way of Kings" at 1 alongside "…, Part 1" and "…, Part 2" at 1.1 and 1.2.
 // Owning the whole novel should not leave its own parts reading as missing
 // volumes, counting against the series, and sitting behind an Add button
 // that would create and queue a download for text already on the shelf.
 //
-// Position alone is not enough to call that: a novella can sit at a
-// fractional position too (Edgedancer at 2.5, beside Words of Radiance at
-// 2), and a novella is a real, separate book. So both signals are required:
-// book's position must be the fractional child of a Present row's integer
-// position (seriesmatch.IntegerFloorPosition), AND book's title must be that
-// Present row's title plus a "Part N" marker (seriesmatch.SplitPartOf). A
+// The two-signal rule itself is seriesmatch.SplitEditionPartOf, shared with
+// db.ListCoveredSplitEditionParts (#3048), which applies the same rule to
+// rows already stored for an install that filled before this landed. A
 // series represented ONLY by its split parts — Wheel of Time's "Two Volume
 // Edition", where there is no unsplit whole at the integer position — never
-// matches this, because there is no Present row to match against; its parts
-// are the real volumes and stay Missing.
-func splitEditionWhole(book metadata.SeriesCatalogBook, present []seriesHardcoverDiffBook) (seriesHardcoverDiffBook, bool) {
-	floor, ok := seriesmatch.IntegerFloorPosition(book.Position)
-	if !ok {
-		return seriesHardcoverDiffBook{}, false
-	}
+// matches this, because there is no eligible whole to match against; its
+// parts are the real volumes and stay Missing.
+//
+// wholes is pre-filtered to Present rows that are also eligible (not
+// excluded, imported or monitored), so an excluded or purely-wanted,
+// unmonitored Present row covers nothing — the same gate the stored-row
+// sweep applies, so the two never disagree about which wholes cover which
+// parts.
+func splitEditionWhole(book metadata.SeriesCatalogBook, wholes []presentWhole) (presentWhole, bool) {
 	partTitle := firstNonEmpty(book.Book.Title, book.Title)
-	for _, whole := range present {
-		if whole.Position == "" || !seriesmatch.SamePosition(whole.Position, floor) {
-			continue
-		}
-		if seriesmatch.SplitPartOf(partTitle, whole.Title) {
+	for _, whole := range wholes {
+		if seriesmatch.SplitEditionPartOf(partTitle, book.Position, whole.title, whole.position) {
 			return whole, true
 		}
 	}
-	return seriesHardcoverDiffBook{}, false
+	return presentWhole{}, false
 }
 
 // logDiffDecision records which catalogue entry a local series book bound

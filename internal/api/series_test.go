@@ -3099,21 +3099,26 @@ func splitEditionCatalog() *metadata.SeriesCatalog {
 // Uncertain band: a whole work that is Uncertain or Missing simply never
 // appears in the `present` slice this function is handed, which is exactly
 // the real-world shape (buildHardcoverDiff only passes diff.Present).
+// TestSplitEditionWhole unit-tests the matching loop directly against
+// crafted presentWhole candidates, independent of how a candidate came to be
+// eligible — that eligibility gate (not excluded, imported or monitored) is
+// decided by the caller before a whole ever reaches this function (see the
+// buildHardcoverDiff-level tests for the gate itself), so an absent whole
+// here stands for either "no Present row at this position" (the Two Volume
+// Edition trap) or "a Present row that failed the eligibility gate."
 func TestSplitEditionWhole(t *testing.T) {
-	wayOfKingsID := int64(1)
-	present := []seriesHardcoverDiffBook{{
-		ForeignBookID: "hc:the-way-of-kings",
-		Title:         "The Way of Kings",
-		Position:      "1",
-		LocalBookID:   &wayOfKingsID,
-		LocalTitle:    "The Way of Kings",
+	wholes := []presentWhole{{
+		position:    "1",
+		title:       "The Way of Kings",
+		localBookID: 1,
+		localTitle:  "The Way of Kings",
 	}}
 
 	cases := []struct {
-		name    string
-		book    metadata.SeriesCatalogBook
-		present []seriesHardcoverDiffBook
-		wantOK  bool
+		name   string
+		book   metadata.SeriesCatalogBook
+		wholes []presentWhole
+		wantOK bool
 	}{
 		{
 			name: "first part of an owned whole",
@@ -3122,8 +3127,8 @@ func TestSplitEditionWhole(t *testing.T) {
 				Title:    "The Way of Kings, Part 1",
 				Book:     models.Book{Title: "The Way of Kings, Part 1"},
 			},
-			present: present,
-			wantOK:  true,
+			wholes: wholes,
+			wantOK: true,
 		},
 		{
 			name: "second part of an owned whole",
@@ -3132,8 +3137,8 @@ func TestSplitEditionWhole(t *testing.T) {
 				Title:    "The Way of Kings, Part 2",
 				Book:     models.Book{Title: "The Way of Kings, Part 2"},
 			},
-			present: present,
-			wantOK:  true,
+			wholes: wholes,
+			wantOK: true,
 		},
 		{
 			name: "novella at a fractional position is not a split edition",
@@ -3142,8 +3147,8 @@ func TestSplitEditionWhole(t *testing.T) {
 				Title:    "Dawnshard",
 				Book:     models.Book{Title: "Dawnshard"},
 			},
-			present: present,
-			wantOK:  false,
+			wholes: wholes,
+			wantOK: false,
 		},
 		{
 			name: "whole number position never matches, even with a part title",
@@ -3152,38 +3157,28 @@ func TestSplitEditionWhole(t *testing.T) {
 				Title:    "The Way of Kings, Part 1",
 				Book:     models.Book{Title: "The Way of Kings, Part 1"},
 			},
-			present: present,
-			wantOK:  false,
+			wholes: wholes,
+			wantOK: false,
 		},
 		{
-			name: "fractional position but no Present row at the floor (Two Volume Edition shape)",
+			name: "no eligible whole at all (Two Volume Edition shape, or one the caller already filtered out)",
 			book: metadata.SeriesCatalogBook{
 				Position: "1.1",
 				Title:    "The Eye of the World, Part 1 of 2",
 				Book:     models.Book{Title: "The Eye of the World, Part 1 of 2"},
 			},
-			present: nil,
-			wantOK:  false,
-		},
-		{
-			name: "whole is bound only as Uncertain or Missing, not Present",
-			book: metadata.SeriesCatalogBook{
-				Position: "1.1",
-				Title:    "The Way of Kings, Part 1",
-				Book:     models.Book{Title: "The Way of Kings, Part 1"},
-			},
-			present: nil, // the whole never made it into the Present slice
-			wantOK:  false,
+			wholes: nil,
+			wantOK: false,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := splitEditionWhole(tc.book, tc.present)
+			got, ok := splitEditionWhole(tc.book, tc.wholes)
 			if ok != tc.wantOK {
 				t.Fatalf("splitEditionWhole() ok = %v, want %v (got %+v)", ok, tc.wantOK, got)
 			}
-			if ok && (got.LocalBookID == nil || *got.LocalBookID != wayOfKingsID) {
-				t.Fatalf("splitEditionWhole() local = %v, want %d", got.LocalBookID, wayOfKingsID)
+			if ok && got.localBookID != 1 {
+				t.Fatalf("splitEditionWhole() local = %d, want 1", got.localBookID)
 			}
 		})
 	}
@@ -3292,6 +3287,111 @@ func TestBuildHardcoverDiffSplitEditionsNeedAnOwnedWhole(t *testing.T) {
 	}
 	if len(diff.Missing) != 2 || diff.MissingCount != 2 {
 		t.Fatalf("Missing = %v (count %d), want both parts (they are the real volumes here)", diffForeignIDs(diff.Missing), diff.MissingCount)
+	}
+}
+
+// TestBuildHardcoverDiffExcludedWholeDoesNotCoverParts is the #3109 review
+// follow-up: db.ListCoveredSplitEditionParts only lets a not-excluded whole
+// cover a stored part, and the catalogue diff has to apply the same gate so
+// the two never disagree about which wholes cover which parts. An excluded
+// Present row — the user said "not this edition" — covers nothing; its parts
+// fall back to Missing like any other unclaimed catalogue row.
+func TestBuildHardcoverDiffExcludedWholeDoesNotCoverParts(t *testing.T) {
+	catalog := splitEditionCatalog()
+	series := &models.Series{
+		ID:    1,
+		Title: "The Stormlight Archive",
+		Books: []models.SeriesBook{{
+			BookID: 1,
+			Book: &models.Book{
+				ID:        1,
+				ForeignID: "calibre:book:1",
+				Title:     "The Way of Kings",
+				SortTitle: "The Way of Kings",
+				Status:    models.BookStatusImported,
+				Excluded:  true,
+			},
+		}},
+	}
+	link := &models.SeriesHardcoverLink{SeriesID: series.ID, HardcoverSeriesID: catalog.ForeignID}
+
+	diff := buildHardcoverDiff(context.Background(), nil, 0, series, link, catalog)
+
+	if len(diff.Covered) != 0 {
+		t.Fatalf("Covered = %v, want empty: an excluded whole must not cover its parts", diffForeignIDs(diff.Covered))
+	}
+	missing := map[string]bool{}
+	for _, row := range diff.Missing {
+		missing[row.ForeignBookID] = true
+	}
+	for _, id := range []string{"hc:the-way-of-kings-part-1", "hc:the-way-of-kings-part-2"} {
+		if !missing[id] {
+			t.Fatalf("%q should fall back to Missing when its whole is excluded: %v", id, diffForeignIDs(diff.Missing))
+		}
+	}
+}
+
+// TestBuildHardcoverDiffUnmonitoredWantedWholeDoesNotCoverParts pins the
+// other half of the #3109 gate: a Present whole that is neither imported nor
+// monitored (Wanted and unmonitored, perhaps added and then turned off) is
+// not a book the user actually has or wants, so it must not cover parts
+// either. TestBuildHardcoverDiffCoversSplitEditionsOfOwnedWork already pins
+// the imported case; this and the next test pin both halves of the "or
+// monitored" branch.
+func TestBuildHardcoverDiffUnmonitoredWantedWholeDoesNotCoverParts(t *testing.T) {
+	catalog := splitEditionCatalog()
+	series := &models.Series{
+		ID:    1,
+		Title: "The Stormlight Archive",
+		Books: []models.SeriesBook{{
+			BookID: 1,
+			Book: &models.Book{
+				ID:        1,
+				ForeignID: "calibre:book:1",
+				Title:     "The Way of Kings",
+				SortTitle: "The Way of Kings",
+				Status:    models.BookStatusWanted,
+				Monitored: false,
+			},
+		}},
+	}
+	link := &models.SeriesHardcoverLink{SeriesID: series.ID, HardcoverSeriesID: catalog.ForeignID}
+
+	diff := buildHardcoverDiff(context.Background(), nil, 0, series, link, catalog)
+
+	if len(diff.Covered) != 0 {
+		t.Fatalf("Covered = %v, want empty: a wanted-but-unmonitored whole must not cover its parts", diffForeignIDs(diff.Covered))
+	}
+}
+
+// TestBuildHardcoverDiffMonitoredWantedWholeCoversParts is the positive half
+// of the "or monitored" branch: a Present whole that is Wanted but monitored
+// — the user asked Bindery to go find it — is exactly the #3048 wiki case
+// ("monitored and wanted"), and does cover its parts even though it is not
+// yet imported.
+func TestBuildHardcoverDiffMonitoredWantedWholeCoversParts(t *testing.T) {
+	catalog := splitEditionCatalog()
+	series := &models.Series{
+		ID:    1,
+		Title: "The Stormlight Archive",
+		Books: []models.SeriesBook{{
+			BookID: 1,
+			Book: &models.Book{
+				ID:        1,
+				ForeignID: "calibre:book:1",
+				Title:     "The Way of Kings",
+				SortTitle: "The Way of Kings",
+				Status:    models.BookStatusWanted,
+				Monitored: true,
+			},
+		}},
+	}
+	link := &models.SeriesHardcoverLink{SeriesID: series.ID, HardcoverSeriesID: catalog.ForeignID}
+
+	diff := buildHardcoverDiff(context.Background(), nil, 0, series, link, catalog)
+
+	if len(diff.Covered) != 2 {
+		t.Fatalf("Covered = %v, want exactly the two Way of Kings parts (whole is wanted and monitored)", diffForeignIDs(diff.Covered))
 	}
 }
 
