@@ -51,3 +51,28 @@ func TestSplitEditionTitleOf(t *testing.T) {
 		})
 	}
 }
+
+func TestSplitEditionBase(t *testing.T) {
+	cases := []struct {
+		title, want string
+		ok          bool
+	}{
+		{"The Eye of the World, Part 1 of 2: From The Two Rivers", "eye of world", true},
+		{"The Way of Kings Pt. 2", "way of kings", true},
+		{"Words of Radiance - Part 1", "words of radiance", true},
+		{"Part 1", "", false},
+		{"The, Part 1", "", false},
+		{"The Eye of the World", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.title, func(t *testing.T) {
+			got, ok := SplitEditionBase(tc.title)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("SplitEditionBase(%q) = %q, %v; want %q, %v", tc.title, got, ok, tc.want, tc.ok)
+			}
+			if ok && got != CleanTitle(got) {
+				t.Errorf("SplitEditionBase(%q) = %q is not in CleanTitle form", tc.title, got)
+			}
+		})
+	}
+}

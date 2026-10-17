@@ -44,16 +44,21 @@ func SplitEditionPartOf(partTitle, partPosition, wholeTitle, wholePosition strin
 // in one says nothing about a position in the other. Inside one series, use
 // SplitEditionPartOf.
 func SplitEditionTitleOf(partTitle, wholeTitle string) bool {
+	base, ok := SplitEditionBase(partTitle)
+	return ok && base == CleanTitle(wholeTitle)
+}
+
+// SplitEditionBase returns the CleanTitle form of the title before a "Part N"
+// marker, which is what SplitEditionTitleOf compares to CleanTitle of the
+// whole, and false when partTitle has no marker or nothing before it. It lets
+// a caller pairing one part against many wholes parse the part once.
+func SplitEditionBase(partTitle string) (string, bool) {
 	loc := splitEditionMarkerRe.FindStringIndex(partTitle)
 	if loc == nil {
-		return false
+		return "", false
 	}
-	prefix := strings.TrimRight(strings.TrimSpace(partTitle[:loc[0]]), " ,:;-")
-	if prefix == "" {
-		return false
-	}
-	whole := CleanTitle(wholeTitle)
-	return whole != "" && CleanTitle(prefix) == whole
+	base := CleanTitle(strings.TrimRight(strings.TrimSpace(partTitle[:loc[0]]), " ,:;-"))
+	return base, base != ""
 }
 
 // fractionalFloor returns the integer floor of pos when pos is a fractional

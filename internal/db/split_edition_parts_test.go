@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/vavallee/bindery/internal/models"
 )
@@ -172,6 +175,81 @@ func TestListCoveredSplitEditionParts_AcrossSeries(t *testing.T) {
 	}
 }
 
+// TestListCoveredSplitEditionParts_ReportsOneWholePerPart pins the ordering
+// and dedup when a part has more than one candidate whole.
+func TestListCoveredSplitEditionParts_ReportsOneWholePerPart(t *testing.T) {
+	f := newSplitPartsFixture(t)
+
+	// "The Way of Kings" beside the part in its series, and "Way of Kings"
+	// (the same CleanTitle) in another series. The same-series whole is the
+	// one reported: the shared-series guard keeps the other off this part, so
+	// the two rules never both match one part and the same-series-first
+	// ordering is only a backstop.
+	sanderson := f.author("hc:sanderson")
+	stormlight := f.series("s:stormlight", "The Stormlight Archive")
+	sameSeriesWhole := f.book(sanderson, "The Way of Kings", models.BookStatusImported, true, 0)
+	f.link(stormlight, sameSeriesWhole, "1")
+	f.link(f.series("s:stormlight-alt", "Stormlight (alt)"), f.book(sanderson, "Way of Kings", models.BookStatusImported, true, 0), "1")
+	kingsPart := f.book(sanderson, "The Way of Kings, Part 1", models.BookStatusWanted, true, 0)
+	f.link(stormlight, kingsPart, "1.1")
+
+	// Two copies of the whole in another series: the part is reported once.
+	jordan := f.author("hc:robert-jordan")
+	wot := f.series("hc-series:1097", "The Wheel of Time")
+	f.link(wot, f.book(jordan, "The Eye of the World", models.BookStatusImported, true, 0), "1")
+	f.link(wot, f.book(jordan, "The Eye of the World", models.BookStatusImported, true, 0), "1")
+	eyePart := f.book(jordan, "The Eye of the World, Part 1 of 2: From The Two Rivers", models.BookStatusWanted, true, 0)
+	f.link(f.series("hc-series:248644", "The Wheel of Time (Finnish Numbering)"), eyePart, "1")
+
+	parts, err := f.books.ListCoveredSplitEditionParts(f.ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := map[int64]int{}
+	for _, p := range parts {
+		count[p.BookID]++
+		if p.BookID == kingsPart && p.WholeBookID != sameSeriesWhole {
+			t.Errorf("part matched both ways reported whole %d, want the same-series whole %d", p.WholeBookID, sameSeriesWhole)
+		}
+	}
+	if count[kingsPart] != 1 || count[eyePart] != 1 {
+		t.Errorf("rows per part = %v, want exactly one each for %d and %d; parts = %+v", count, kingsPart, eyePart, parts)
+	}
+}
+
+// TestListCoveredSplitEditionParts_GuardIgnoresOtherOwners: series rows carry
+// no owner, so a series can list two users' books. Another user's copy of the
+// whole beside this user's part must not keep this user's part searched.
+func TestListCoveredSplitEditionParts_GuardIgnoresOtherOwners(t *testing.T) {
+	f := newSplitPartsFixture(t)
+	alice, err := f.users.Create(f.ctx, "alice", "h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := f.users.Create(f.ctx, "bob", "h2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jordan := f.author("hc:robert-jordan")
+	wot := f.series("hc-series:1097", "The Wheel of Time")
+	finnish := f.series("hc-series:248644", "The Wheel of Time (Finnish Numbering)")
+	// Bob's own copy of the whole, listed in the Finnish series beside Alice's
+	// part. Created first, so the lower id cannot hide a leak behind ordering.
+	f.link(finnish, f.book(jordan, "The Eye of the World", models.BookStatusImported, true, bob.ID), "2")
+	aliceWhole := f.book(jordan, "The Eye of the World", models.BookStatusImported, true, alice.ID)
+	f.link(wot, aliceWhole, "1")
+	part := f.book(jordan, "The Eye of the World, Part 1 of 2: From The Two Rivers", models.BookStatusWanted, true, alice.ID)
+	f.link(finnish, part, "1")
+
+	parts, err := f.books.ListCoveredSplitEditionParts(f.ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 1 || parts[0].BookID != part || parts[0].WholeBookID != aliceWhole {
+		t.Errorf("parts = %+v, want alice's part %d covered by her own whole %d", parts, part, aliceWhole)
+	}
+}
+
 // TestListCoveredSplitEditionParts_AcrossSeriesGuards pins what the
 // title-only cross-series rule must not pair. Each case is its own author so
 // no case can cover another's part.
@@ -240,6 +318,46 @@ func TestListCoveredSplitEditionParts_AcrossSeriesGuards(t *testing.T) {
 			p := f.book(a, partTitle, models.BookStatusWanted, true, 0)
 			f.link(s, p, "3")
 			// Another row with the whole's title, in no series shared with the part.
+			f.link(f.series("s:"+n+"-other", n+" other"), f.book(a, wholeTitle, models.BookStatusImported, true, 0), "1")
+			return p
+		}},
+		{"same author, title is not the whole plus a marker", func(n string) int64 {
+			// Passes the SQL marker GLOB; only the Go title check rejects it.
+			a := f.author("hc:" + n)
+			f.link(f.series("s:"+n+"-a", n+" a"), f.book(a, wholeTitle, models.BookStatusImported, true, 0), "1")
+			p := f.book(a, "The Eye of the World Companion, Part 2", models.BookStatusWanted, true, 0)
+			f.link(f.series("s:"+n+"-b", n+" b"), p, "1")
+			return p
+		}},
+		{"part in two series, one shared with the whole", func(n string) int64 {
+			// The guard looks at every series the part is in, not only the
+			// row being reported: the shared series decides, and there the
+			// part is its own volume.
+			a := f.author("hc:" + n)
+			shared := f.series("s:"+n+"-shared", n+" shared")
+			f.link(shared, f.book(a, wholeTitle, models.BookStatusImported, true, 0), "1")
+			p := f.book(a, partTitle, models.BookStatusWanted, true, 0)
+			f.link(shared, p, "3")
+			f.link(f.series("s:"+n+"-other", n+" other"), p, "1")
+			return p
+		}},
+		{"shares a series with a differently cased copy of the whole", func(n string) int64 {
+			a := f.author("hc:" + n)
+			s := f.series("s:"+n, n)
+			f.link(s, f.book(a, "the eye of the world", models.BookStatusImported, true, 0), "1")
+			p := f.book(a, partTitle, models.BookStatusWanted, true, 0)
+			f.link(s, p, "3")
+			f.link(f.series("s:"+n+"-other", n+" other"), f.book(a, wholeTitle, models.BookStatusImported, true, 0), "1")
+			return p
+		}},
+		{"shares a series with a copy of the whole that differs only by normalisation", func(n string) int64 {
+			// The guard compares titles with CleanTitle, as the match does,
+			// so "Eye of the World" beside the part still blocks it.
+			a := f.author("hc:" + n)
+			s := f.series("s:"+n, n)
+			f.link(s, f.book(a, "Eye of the World", models.BookStatusImported, true, 0), "1")
+			p := f.book(a, partTitle, models.BookStatusWanted, true, 0)
+			f.link(s, p, "3")
 			f.link(f.series("s:"+n+"-other", n+" other"), f.book(a, wholeTitle, models.BookStatusImported, true, 0), "1")
 			return p
 		}},
@@ -355,5 +473,100 @@ func (f *splitPartsFixture) exclude(bookID int64) {
 	f.t.Helper()
 	if _, err := f.db.ExecContext(f.ctx, "UPDATE books SET excluded = 1 WHERE id = ?", bookID); err != nil {
 		f.t.Fatal(err)
+	}
+}
+
+// TestListCoveredSplitEditionParts_LargeLibraryIsFast keeps the cross-series
+// branch on a plan that starts from the part: driven from the whole, SQLite
+// scanned every book against every same-owner book, about 30 s on 10k books
+// (#3324 review).
+func TestListCoveredSplitEditionParts_LargeLibraryIsFast(t *testing.T) {
+	if raceEnabled {
+		t.Skip("wall clock budget does not hold under -race; TestListCoveredSplitEditionParts_PlanStartsFromThePart pins the plan")
+	}
+	f := newSplitPartsFixture(t)
+	const authors, seriesPerAuthor, booksPerSeries = 50, 3, 20
+	for a := 0; a < authors; a++ {
+		authorID := f.author(fmt.Sprintf("hc:perf-%d", a))
+		for s := 0; s < seriesPerAuthor; s++ {
+			seriesID := f.series(fmt.Sprintf("s:perf-%d-%d", a, s), fmt.Sprintf("perf %d %d", a, s))
+			for b := 0; b < booksPerSeries; b++ {
+				title := fmt.Sprintf("Volume %d %d %d", a, s, b)
+				if b%4 == 3 {
+					title = fmt.Sprintf("Volume %d %d %d, Part 1 of 2", a, s, b-1)
+				}
+				status := models.BookStatusImported
+				if b%2 == 1 {
+					status = models.BookStatusWanted
+				}
+				f.link(seriesID, f.book(authorID, title, status, true, 0), fmt.Sprint(b+1))
+			}
+		}
+	}
+
+	start := time.Now()
+	parts, err := f.books.ListCoveredSplitEditionParts(f.ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	// Every part here is its own volume, at an integer position, in its
+	// whole's own series, so the guard has to leave all of them alone.
+	if len(parts) != 0 {
+		t.Errorf("got %d covered parts, want 0 (first: %+v)", len(parts), parts[0])
+	}
+	t.Logf("%d books: %v", authors*seriesPerAuthor*booksPerSeries, elapsed)
+	if elapsed > 2*time.Second {
+		t.Fatalf("ListCoveredSplitEditionParts over %d books took %v, want well under 2s", authors*seriesPerAuthor*booksPerSeries, elapsed)
+	}
+}
+
+// TestListCoveredSplitEditionParts_PlanStartsFromThePart pins the plan the
+// timing test measures, deterministically and under -race too: neither branch
+// reaches the whole (bw) through idx_books_owner, and the cross-series branch
+// reaches it by author.
+func TestListCoveredSplitEditionParts_PlanStartsFromThePart(t *testing.T) {
+	f := newSplitPartsFixture(t)
+	bwLine := regexp.MustCompile(`\bbw\b`)
+	authorIdx := regexp.MustCompile(`\bidx_books_author_id\b`)
+	ownerIdx := regexp.MustCompile(`\bidx_books_owner\b`)
+	explain := func(seriesID int64) (plan, bw []string) {
+		t.Helper()
+		query, args := coveredSplitEditionPartsQuery(seriesID)
+		rows, err := f.db.QueryContext(f.ctx, "EXPLAIN QUERY PLAN "+query, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan = append(plan, detail)
+			if bwLine.MatchString(detail) {
+				bw = append(bw, detail)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return plan, bw
+	}
+	for _, seriesID := range []int64{0, 1} {
+		plan, bw := explain(seriesID)
+		byAuthor := false
+		for _, line := range bw {
+			if authorIdx.MatchString(line) {
+				byAuthor = true
+			}
+			if ownerIdx.MatchString(line) {
+				t.Errorf("seriesID %d: whole looked up through idx_books_owner: %q", seriesID, line)
+			}
+		}
+		if !byAuthor {
+			t.Errorf("seriesID %d: no step reaches bw by idx_books_author_id; plan:\n%s", seriesID, strings.Join(plan, "\n"))
+		}
 	}
 }
